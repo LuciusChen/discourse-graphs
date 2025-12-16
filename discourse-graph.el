@@ -1467,31 +1467,30 @@ If FILE is nil, prompt for output path."
     (with-temp-file file
       (insert "digraph DiscourseGraph {\n")
       (insert "  rankdir=LR;\n")
-      (insert "  node [shape=box, style=filled, fontname=\"Helvetica\"];\n")
-      (insert "  edge [fontname=\"Helvetica\", fontsize=10];\n\n")
-      ;; Nodes with colors by type
+      (insert "  node [shape=box, style=rounded];\n\n")
+      ;; Nodes
       (insert "  // Nodes\n")
       (dolist (node nodes)
         (let* ((id (nth 0 node))
-               (ntype (intern (nth 1 node)))
-               (title (nth 2 node))
+               (ntype (intern (or (nth 1 node) "unknown")))
+               (title (or (nth 2 node) "Untitled"))
                (type-info (alist-get ntype dg-node-types))
                (color (or (plist-get type-info :color) "white"))
-               (safe-title (replace-regexp-in-string "\"" "\\\\\""
-                           (truncate-string-to-width title 40 nil nil "..."))))
-          (insert (format "  \"%s\" [label=\"%s\", fillcolor=\"%s\"];\n"
+               (safe-title (dg--dot-escape
+                            (truncate-string-to-width title 40 nil nil "…"))))
+          (insert (format "  \"%s\" [label=\"%s\", fillcolor=\"%s\", style=\"filled,rounded\"];\n"
                           id safe-title color))))
       (insert "\n  // Relations\n")
-      ;; Relations with colors and styles
+      ;; Relations
       (dolist (rel relations)
-        (let* ((rel-type (intern (nth 2 rel)))
-               (rel-info (alist-get rel-type dg-relation-types))
-               (color (or (plist-get rel-info :color) "black"))
+        (let* ((rel-type (or (nth 2 rel) "unknown"))
+               (rel-info (alist-get (intern rel-type) dg-relation-types))
                (style (or (plist-get rel-info :style) "solid")))
-          (insert (format "  \"%s\" -> \"%s\" [label=\"%s\", color=\"%s\", style=\"%s\"];\n"
-                          (nth 0 rel) (nth 1 rel) (nth 2 rel) color style))))
+          (insert (format "  \"%s\" -> \"%s\" [label=\"%s\", style=\"%s\"];\n"
+                          (nth 0 rel) (nth 1 rel) rel-type style))))
       (insert "}\n"))
-    (message "Exported to %s" file)))
+    (message "Exported %d nodes, %d relations to %s"
+             (length nodes) (length relations) file)))
 
 ;;; ============================================================
 ;;; Export: Markdown
