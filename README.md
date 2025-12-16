@@ -124,26 +124,24 @@ All commands are also available via `C-c d d` (transient menu).
 ## Context Panel
 
 The context panel (`C-c d x`) shows:
-
 ```
 #+title: [CLM] Social media amplifies divisive content [+2/-1]
 #+property: id e5f6g7h8
 
-*  Answers
+*  Answers
 ** Does social media increase polarization? :QUE:
 [[dg:a1b2c3d4]]
 
-*  Supported By
+*  Supported By
 ** Study shows 40% increase... :EVD:
 [[dg:i9j0k1l2]]
-SUPPORTS_NOTE: This study provides quantitative evidence for algorithm-driven amplification
-Summary of the evidence...
+[SUPPORTS_NOTE] This study provides quantitative evidence for algorithm-driven amplification
 ```
 
 - Auto-updates as you navigate between nodes
 - Click links to jump to related nodes
-- Press `b` to go back in history
-- Context notes show why relations exist
+- Press `l` to go back in history
+- `[TYPE_NOTE]` shows why relations exist
 
 ## Creating Relations
 
