@@ -27,7 +27,7 @@
 ;; - Interactive query builder with save/load
 ;; - Transient-based menu system
 ;; - Context overlay showing relation counts
-;; - Export to Graphviz DOT and Markdown
+;; - Export to Graphviz SVG and Markdown
 ;;
 ;; Quick Start:
 ;;   (require 'discourse-graph)
@@ -1458,8 +1458,13 @@ but will be ignored until DG_TYPE is set again."
       (message "Node removed from discourse graph"))))
 
 ;;; ============================================================
-;;; Export: Graphviz DOT
+;;; Export: Graphviz SVG
 ;;; ============================================================
+
+(defcustom dg-graphviz-command "dot"
+  "Graphviz command for rendering graphs."
+  :type 'string
+  :group 'discourse-graph)
 
 (defun dg--dot-escape (str)
   "Escape STR for use in DOT labels."
@@ -1472,39 +1477,88 @@ but will be ignored until DG_TYPE is set again."
       "\\\\n"
       str))))
 
-(defun dg-export-dot (&optional file)
-  "Export discourse graph to Graphviz DOT format.
-If FILE is nil, prompt for output path."
-  (interactive "FExport to DOT file (use .dot extension): ")
-  (let ((nodes (sqlite-select (dg--db) "SELECT id, type, title FROM nodes"))
-        (relations (sqlite-select (dg--db) "SELECT source_id, target_id, rel_type FROM relations")))
-    (with-temp-file file
-      (insert "digraph DiscourseGraph {\n")
-      (insert "  rankdir=LR;\n")
-      (insert "  node [shape=box, style=rounded];\n\n")
-      ;; Nodes
-      (insert "  // Nodes\n")
-      (dolist (node nodes)
-        (let* ((id (nth 0 node))
-               (ntype (intern (or (nth 1 node) "unknown")))
-               (title (or (nth 2 node) "Untitled"))
-               (type-info (alist-get ntype dg-node-types))
-               (color (or (plist-get type-info :color) "white"))
-               (safe-title (dg--dot-escape
-                            (truncate-string-to-width title 40 nil nil "…"))))
-          (insert (format "  \"%s\" [label=\"%s\", fillcolor=\"%s\", style=\"filled,rounded\"];\n"
-                          id safe-title color))))
-      (insert "\n  // Relations\n")
-      ;; Relations
-      (dolist (rel relations)
-        (let* ((rel-type (or (nth 2 rel) "unknown"))
-               (rel-info (alist-get (intern rel-type) dg-relation-types))
-               (style (or (plist-get rel-info :style) "solid")))
-          (insert (format "  \"%s\" -> \"%s\" [label=\"%s\", style=\"%s\"];\n"
-                          (nth 0 rel) (nth 1 rel) rel-type style))))
-      (insert "}\n"))
-    (message "Exported %d nodes, %d relations to %s"
-             (length nodes) (length relations) file)))
+(defun dg--generate-dot (nodes-hash edges &optional center-id)
+  "Generate DOT content string for NODES-HASH and EDGES.
+NODES-HASH is a hash table of node IDs.
+EDGES is a list of (source-id rel-type target-id).
+If CENTER-ID provided, highlight that node."
+  (with-temp-buffer
+    (insert "digraph DiscourseGraph {\n")
+    (insert "  rankdir=LR;\n")
+    (insert "  bgcolor=transparent;\n")
+    (insert "  node [shape=box, style=rounded];\n\n")
+    ;; Nodes
+    (maphash
+     (lambda (id _)
+       (let* ((node (dg-get id))
+              (title (or (plist-get node :title) id))
+              (type-str (plist-get node :type))
+              (type-sym (and type-str (intern type-str)))
+              (type-info (and type-sym (alist-get type-sym dg-node-types)))
+              (color (or (and type-info (plist-get type-info :color)) "white"))
+              (is-center (and center-id (string= id center-id))))
+         (insert (format "  \"%s\" [label=\"%s\", fillcolor=\"%s\", style=\"%s\"];\n"
+                         id
+                         (dg--dot-escape (truncate-string-to-width title 30 nil nil "…"))
+                         color
+                         (if is-center "filled,bold,rounded" "filled,rounded")))))
+     nodes-hash)
+    ;; Edges
+    (dolist (edge edges)
+      (let* ((from (nth 0 edge))
+             (rel-type-str (nth 1 edge))
+             (to (nth 2 edge))
+             (rel-sym (and rel-type-str (intern rel-type-str)))
+             (rel-info (and rel-sym (alist-get rel-sym dg-relation-types)))
+             (style (or (and rel-info (plist-get rel-info :style)) "solid")))
+        (insert (format "  \"%s\" -> \"%s\" [label=\"%s\", style=\"%s\"];\n"
+                        from to rel-type-str style))))
+    (insert "}\n")
+    (buffer-string)))
+
+(defun dg--dot-to-svg (dot-content file)
+  "Convert DOT-CONTENT to SVG and save to FILE.
+Returns t on success, nil on failure."
+  (let ((dot-file (make-temp-file "dg-export" nil ".dot")))
+    (unwind-protect
+        (progn
+          (with-temp-file dot-file
+            (insert dot-content))
+          (when (executable-find dg-graphviz-command)
+            (let ((raw-svg (make-temp-file "dg-export" nil ".svg")))
+              (unwind-protect
+                  (progn
+                    (call-process dg-graphviz-command nil nil nil
+                                  "-Tsvg" dot-file "-o" raw-svg)
+                    ;; Replace hardcoded colors with CSS variables
+                    (with-temp-file file
+                      (insert-file-contents raw-svg)
+                      (goto-char (point-min))
+                      (while (re-search-forward "\\(fill\\|stroke\\)=\"black\"" nil t)
+                        (replace-match "\\1=\"var(--fg, #333)\""))
+                      (goto-char (point-min))
+                      (while (re-search-forward "\\(fill\\|stroke\\)=\"white\"" nil t)
+                        (replace-match "\\1=\"var(--bg, #fff)\"")))
+                    t)
+                (delete-file raw-svg)))))
+      (delete-file dot-file))))
+
+(defun dg-export-svg (&optional file)
+  "Export entire discourse graph to SVG.
+The SVG uses CSS variables for colors, suitable for light/dark mode."
+  (interactive "FExport to SVG file: ")
+  (let* ((nodes (sqlite-select (dg--db) "SELECT id FROM nodes"))
+         (relations (sqlite-select (dg--db) "SELECT source_id, rel_type, target_id FROM relations"))
+         (nodes-hash (make-hash-table :test 'equal)))
+    ;; Build nodes hash
+    (dolist (node nodes)
+      (puthash (nth 0 node) t nodes-hash))
+    ;; Generate and convert
+    (let ((dot-content (dg--generate-dot nodes-hash relations)))
+      (if (dg--dot-to-svg dot-content file)
+          (message "Exported %d nodes, %d relations to %s"
+                   (length nodes) (length relations) file)
+        (user-error "Failed to generate SVG. Is Graphviz installed?")))))
 
 ;;; ============================================================
 ;;; Export: Markdown
@@ -1828,29 +1882,21 @@ With prefix argument (WITH-NOTE), also prompt for context note."
       (message "Deleted query: %s" name))))
 
 ;;; ============================================================
-;;; Graph Preview (using Graphviz)
+;;; Graph Preview
 ;;; ============================================================
 
-(defcustom dg-graphviz-command "dot"
-  "Graphviz command for rendering graphs."
-  :type 'string
-  :group 'discourse-graph)
-
-(defun dg-graph-preview ()
-  "Generate and preview graph of current node's neighborhood."
-  (interactive)
-  (let ((id (dg--get-id-at-point)))
-    (if (not id)
-        (user-error "No discourse node at point")
-      (dg--preview-neighborhood id 2))))
-
-(defun dg--preview-neighborhood (center-id depth)
-  "Preview graph neighborhood around CENTER-ID up to DEPTH levels."
-  (let* ((nodes-seen (make-hash-table :test 'equal))
-         (edges nil)
-         (dot-file (make-temp-file "dg-preview" nil ".dot"))
-         (png-file (concat (file-name-sans-extension dot-file) ".png")))
-    ;; Collect nodes and edges using BFS
+(defun dg-graph-preview (&optional depth)
+  "Preview graph neighborhood around current node as SVG.
+DEPTH controls how many levels of relations to include (default 2)."
+  (interactive "P")
+  (let* ((center-id (dg--get-id-at-point))
+         (depth (or depth 2))
+         (nodes-seen (make-hash-table :test 'equal))
+         (edges '())
+         (svg-file (make-temp-file "dg-preview" nil ".svg")))
+    (unless center-id
+      (user-error "Not on a discourse node"))
+    ;; Collect nodes using BFS
     (dg--collect-neighborhood center-id depth nodes-seen)
     ;; Collect edges between seen nodes
     (maphash (lambda (id _)
@@ -1862,51 +1908,19 @@ With prefix argument (WITH-NOTE), also prompt for context note."
                    (when (gethash (nth 2 rel) nodes-seen)
                      (push rel edges)))))
              nodes-seen)
-    ;; Generate DOT
-    (with-temp-file dot-file
-      (insert "digraph discourse_graph {\n")
-      (insert "  rankdir=LR;\n")
-      (insert "  node [shape=box, style=rounded];\n")
-      ;; Nodes
-      (maphash
-       (lambda (id _)
-         (let* ((node (dg-get id))
-                (title (or (plist-get node :title) id))
-                (type-str (plist-get node :type))
-                (type-sym (and type-str (intern type-str)))
-                (type-info (and type-sym (alist-get type-sym dg-node-types)))
-                (color (or (and type-info (plist-get type-info :color)) "white"))
-                (is-center (string= id center-id)))
-           (insert (format "  \"%s\" [label=\"%s\", fillcolor=\"%s\", style=\"%s\"];\n"
-                           id
-                           (dg--dot-escape (truncate-string-to-width title 25 nil nil "…"))
-                           color
-                           (if is-center "filled,bold,rounded" "filled,rounded")))))
-       nodes-seen)
-      ;; Edges
-      (dolist (edge edges)
-        (let* ((from (nth 0 edge))
-               (rel-type-str (nth 1 edge))
-               (to (nth 2 edge))
-               (rel-sym (and rel-type-str (intern rel-type-str)))
-               (rel-info (and rel-sym (alist-get rel-sym dg-relation-types)))
-               (style (or (and rel-info (plist-get rel-info :style)) "solid")))
-          (insert (format "  \"%s\" -> \"%s\" [label=\"%s\", style=\"%s\"];\n"
-                          from to rel-type-str style))))
-      (insert "}\n"))
-    ;; Render
-    (if (executable-find dg-graphviz-command)
-        (progn
-          (call-process dg-graphviz-command nil nil nil
-                        "-Tpng" dot-file "-o" png-file)
-          (if (file-exists-p png-file)
-              (progn
-                (find-file png-file)
-                (message "Graph preview generated"))
-            (find-file dot-file)
-            (message "PNG generation failed, showing DOT file")))
-      (find-file dot-file)
-      (message "Graphviz not found, showing DOT file"))))
+    ;; Generate and display
+    (let ((dot-content (dg--generate-dot nodes-seen edges center-id)))
+      (if (dg--dot-to-svg dot-content svg-file)
+          (progn
+            (find-file svg-file)
+            (message "Graph preview: %d nodes, %d edges"
+                     (hash-table-count nodes-seen) (length edges)))
+        ;; Fallback: show DOT
+        (let ((dot-file (make-temp-file "dg-preview" nil ".dot")))
+          (with-temp-file dot-file
+            (insert dot-content))
+          (find-file dot-file)
+          (message "Graphviz not found, showing DOT file"))))))
 
 (defun dg--collect-neighborhood (id depth seen)
   "Collect nodes in neighborhood of ID up to DEPTH into SEEN hash."
@@ -2060,7 +2074,7 @@ With prefix argument (WITH-NOTE), also prompt for context note."
     ("/" "Query builder" dg-query-builder)
     ("L" "Load query" dg-query-load)]
    ["Export"
-    ("E d" "DOT" dg-export-dot)
+    ("E s" "SVG" dg-export-svg)
     ("E m" "Markdown" dg-export-markdown)]]
   [["Maintain"
     ("!" "Rebuild cache" dg-rebuild-cache)

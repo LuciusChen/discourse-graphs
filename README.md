@@ -30,7 +30,7 @@ This approach, developed by [Joel Chan](https://joelchan.me/) for Roam Research,
 - **Query builder** — Find nodes by type and relation patterns
 - **Smart relation creation** — Suggests relation types based on node types
 - **Denote compatible** — Works with denote file naming conventions
-- **Export** — Graphviz DOT and Markdown export
+- **Export** — Graphviz SVG and Markdown export
 
 ## Requirements
 
@@ -228,13 +228,16 @@ This will:
 
 ## Export
 
-### Graphviz DOT
-`C-c d d` then `E d` — Export graph structure as DOT file
+### SVG
+`C-c d d` then `E s` — Export entire graph as SVG
 
-Convert to image using Graphviz:
-```bash
-dot -Tpng discourse-graph.dot -o graph.png
-dot -Tsvg discourse-graph.dot -o graph.svg
+The SVG uses CSS variables for colors, making it suitable for light/dark mode:
+
+```css
+:root {
+  --fg: light-dark(#333, #ccc);
+  --bg: light-dark(#fff, #333);
+}
 ```
 
 ### Markdown
