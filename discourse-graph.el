@@ -1486,7 +1486,8 @@ If CENTER-ID provided, highlight that node."
     (insert "digraph DiscourseGraph {\n")
     (insert "  rankdir=LR;\n")
     (insert "  bgcolor=transparent;\n")
-    (insert "  node [shape=box, style=rounded];\n\n")
+    (insert "  node [shape=box, style=rounded, color=\"black\", fontcolor=\"black\"];\n")
+    (insert "  edge [color=\"black\", fontcolor=\"black\"];\n\n")
     ;; Nodes
     (maphash
      (lambda (id _)
@@ -1516,10 +1517,18 @@ If CENTER-ID provided, highlight that node."
     (insert "}\n")
     (buffer-string)))
 
-(defun dg--dot-to-svg (dot-content file)
+(defun dg--dot-to-svg (dot-content file &optional for-web)
   "Convert DOT-CONTENT to SVG and save to FILE.
+If FOR-WEB is non-nil, use CSS variables for theming.
+Otherwise use current Emacs theme colors.
 Returns t on success, nil on failure."
-  (let ((dot-file (make-temp-file "dg-export" nil ".dot")))
+  (let ((dot-file (make-temp-file "dg-export" nil ".dot"))
+        (fg-color (if for-web
+                      "var(--fg, #333)"
+                    (face-foreground 'default nil 'default)))
+        (bg-color (if for-web
+                      "var(--bg, #fff)"
+                    (face-background 'default nil 'default))))
     (unwind-protect
         (progn
           (with-temp-file dot-file
@@ -1530,15 +1539,25 @@ Returns t on success, nil on failure."
                   (progn
                     (call-process dg-graphviz-command nil nil nil
                                   "-Tsvg" dot-file "-o" raw-svg)
-                    ;; Replace hardcoded colors with CSS variables
                     (with-temp-file file
                       (insert-file-contents raw-svg)
+                      ;; Insert CSS style block after <svg> tag
                       (goto-char (point-min))
-                      (while (re-search-forward "\\(fill\\|stroke\\)=\"black\"" nil t)
-                        (replace-match "\\1=\"var(--fg, #333)\""))
-                      (goto-char (point-min))
-                      (while (re-search-forward "\\(fill\\|stroke\\)=\"white\"" nil t)
-                        (replace-match "\\1=\"var(--bg, #fff)\"")))
+                      (when (re-search-forward "<svg[^>]*>" nil t)
+                        (insert (format "\n<style>
+  .node text { fill: #333; }
+  .edge text { fill: %s; }
+  .edge path, .edge polygon { stroke: %s; }
+</style>\n" fg-color fg-color)))
+                      ;; Replace explicit black/white values
+                      (dolist (black '("=\"black\"" "=\"#000000\"" "=\"#000\""))
+                        (goto-char (point-min))
+                        (while (search-forward black nil t)
+                          (replace-match (format "=\"%s\"" fg-color))))
+                      (dolist (white '("=\"white\"" "=\"#ffffff\"" "=\"#fff\""))
+                        (goto-char (point-min))
+                        (while (search-forward white nil t)
+                          (replace-match (format "=\"%s\"" bg-color)))))
                     t)
                 (delete-file raw-svg)))))
       (delete-file dot-file))))
@@ -1555,7 +1574,7 @@ The SVG uses CSS variables for colors, suitable for light/dark mode."
       (puthash (nth 0 node) t nodes-hash))
     ;; Generate and convert
     (let ((dot-content (dg--generate-dot nodes-hash relations)))
-      (if (dg--dot-to-svg dot-content file)
+      (if (dg--dot-to-svg dot-content file t)
           (message "Exported %d nodes, %d relations to %s"
                    (length nodes) (length relations) file)
         (user-error "Failed to generate SVG. Is Graphviz installed?")))))
@@ -1910,7 +1929,7 @@ DEPTH controls how many levels of relations to include (default 2)."
              nodes-seen)
     ;; Generate and display
     (let ((dot-content (dg--generate-dot nodes-seen edges center-id)))
-      (if (dg--dot-to-svg dot-content svg-file)
+      (if (dg--dot-to-svg dot-content svg-file nil)
           (progn
             (find-file svg-file)
             (message "Graph preview: %d nodes, %d edges"
