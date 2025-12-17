@@ -25,7 +25,7 @@ This approach, developed by [Joel Chan](https://joelchan.me/) for Roam Research,
 ## Features
 
 - **SQLite-backed storage** — Fast queries even with thousands of nodes
-- **Context panel** — See all relations for the current node at a glance
+- **Context panel with transclusion** — See related nodes with their full content inline
 - **Inline overlays** — `[+3/-1]` shows support/oppose counts on headings
 - **Query builder** — Find nodes by type and relation patterns
 - **Smart relation creation** — Suggests relation types based on node types
@@ -124,26 +124,44 @@ All commands are also available via `C-c d d` (transient menu).
 
 ## Context Panel
 
-The context panel (`C-c d x`) shows:
+The context panel (`C-c d x`) displays related nodes with their **full content** (transclusion style):
 
-```
+```org
 #+title: [CLM] Social media amplifies divisive content [+2/-1]
 #+property: id e5f6g7h8
 
 *  Answers
 ** Does social media increase polarization? :QUE:
 [[dg:a1b2c3d4]]
+#+begin_quote
+This is the main research question we're exploring. We want to understand
+the relationship between social media use and political polarization...
+#+end_quote
 
 *  Supported By
 ** Study shows 40% increase... :EVD:
 [[dg:i9j0k1l2]]
 [SUPPORTS_NOTE] This study provides quantitative evidence for algorithm-driven amplification
+#+begin_quote
+Randomized controlled trial with 500 participants across 3 age groups.
+
+Methodology:
+- Double-blind placebo-controlled design
+- Cognitive battery administered at 30, 60, 90 minutes
+
+Results:
+- Attention tasks: d=0.8, p<0.001
+- Working memory: d=0.4, p<0.01
+#+end_quote
 ```
 
-- Auto-updates as you navigate between nodes
-- Click links to jump to related nodes
-- Press `l` to go back in history
-- `[TYPE_NOTE]` shows why relations exist
+Features:
+- **Transclusion** — Full node content displayed in quote blocks
+- **Auto-updates** as you navigate between nodes
+- **Foldable** — Use `TAB` to collapse/expand individual nodes
+- **Click links** to jump to related nodes
+- **Press `l`** to go back in history
+- **`[TYPE_NOTE]`** shows why relations exist
 
 ## Creating Relations
 
@@ -214,13 +232,16 @@ This will:
 (setq dg-db-file "~/.emacs.d/discourse-graph.db")
 
 ;; Context panel width
-(setq dg-context-window-width 45)
+(setq dg-context-window-width 0.3)
 
 ;; Auto-update context when moving between nodes
 (setq dg-context-auto-update t)
 
 ;; Show overlays on headings
 (setq dg-overlay-enable t)
+
+;; Maximum lines to display per node in context panel (nil for unlimited)
+(setq dg-context-max-lines 30)
 
 ;; Use with denote
 (setq dg-use-denote t)
@@ -284,7 +305,7 @@ The SVG uses CSS variables for colors, making it suitable for light/dark mode:
 | Query builder | ✓ | ✓ |
 | Block-level nodes | ✓ | ✗ (heading-level) |
 | Interactive graph | ✓ | ✗ (static export) |
-| Transclusion | ✓ | ✗ (use org-transclusion) |
+| Transclusion | ✓ | ✓ (in context panel) |
 | Offline/local | ✗ | ✓ |
 | Plain text | ✗ | ✓ |
 | Customizable | Limited | ✓ (it's Emacs) |

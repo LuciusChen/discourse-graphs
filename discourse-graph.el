@@ -767,6 +767,63 @@ Returns DG_SUMMARY property if exists, otherwise first paragraph."
                         (dg--extract-first-paragraph)))))))
           (error nil))))))
 
+(defcustom dg-context-max-lines 30
+  "Maximum number of lines to display for node content in context panel.
+Set to nil for unlimited."
+  :type '(choice integer (const nil))
+  :group 'discourse-graph)
+
+(defun dg--fetch-node-content (id)
+  "Fetch complete content for node ID from source file.
+Returns the body content (excluding properties drawer and planning lines).
+Content is truncated according to `dg-context-max-lines'."
+  (let ((node (dg-get id)))
+    (when node
+      (let ((file (plist-get node :file))
+            (pos (plist-get node :pos)))
+        (when (and file (file-readable-p file))
+          (condition-case nil
+              (let ((existing-buffer (get-file-buffer file)))
+                (with-current-buffer (or existing-buffer
+                                         (let ((inhibit-message t))
+                                           (find-file-noselect file t)))
+                  (save-excursion
+                    (save-restriction
+                      (widen)
+                      (goto-char (or pos (point-min)))
+                      (let* ((element (org-element-at-point))
+                             (content-begin (org-element-property :contents-begin element))
+                             (content-end (org-element-property :contents-end element)))
+                        (when (and content-begin content-end)
+                          (let ((raw-content (buffer-substring-no-properties
+                                              content-begin content-end)))
+                            ;; Clean up: remove properties drawer
+                            (with-temp-buffer
+                              (insert raw-content)
+                              (goto-char (point-min))
+                              ;; Remove :PROPERTIES: ... :END:
+                              (when (re-search-forward "^[ \t]*:PROPERTIES:[ \t]*$" nil t)
+                                (let ((prop-start (match-beginning 0)))
+                                  (when (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
+                                    (delete-region prop-start (1+ (point))))))
+                              ;; Remove planning lines
+                              (goto-char (point-min))
+                              (while (looking-at-p "^[ \t]*\\(DEADLINE:\\|SCHEDULED:\\|CLOSED:\\)")
+                                (delete-region (point) (progn (forward-line 1) (point))))
+                              ;; Trim and truncate
+                              (let ((content (string-trim (buffer-string))))
+                                (when (and dg-context-max-lines
+                                           (not (string-empty-p content)))
+                                  (let* ((lines (split-string content "\n"))
+                                         (total (length lines)))
+                                    (when (> total dg-context-max-lines)
+                                      (setq content
+                                            (concat
+                                             (string-join (seq-take lines dg-context-max-lines) "\n")
+                                             (format "\n... (%d more lines)" (- total dg-context-max-lines)))))))
+                                content)))))))))
+            (error nil)))))))
+
 (defun dg--extract-first-paragraph ()
   "Extract first non-empty paragraph after current heading or file start."
   (save-excursion
@@ -949,18 +1006,20 @@ REL is (direction rel_type node_id title type context_note)."
     (insert (format "** %s :%s:\n" target-title type-short))
     ;; Link on separate line (hidden when folded)
     (insert (format "[[dg:%s]]\n" target-id))
-    ;; Context note OR summary (not both)
-    (if (and context-note (not (string-empty-p context-note)))
-        ;; Show context note with relation type label
-        (let ((label (format "[%s_NOTE] " (upcase rel-type))))
-          (insert (concat
-                   (propertize label 'face 'dg-context-note-label 'font-lock-face 'dg-context-note-label)
-                   (format "%s\n" context-note))))
-      ;; Otherwise show summary
-      (let ((summary (dg-get-summary target-id)))
-        (when summary
-          (insert summary)
-          (insert "\n"))))))
+    ;; Context note with relation type label
+    (when (and context-note (not (string-empty-p context-note)))
+      (let ((label (format "[%s_NOTE] " (upcase rel-type))))
+        (insert (concat
+                 (propertize label 'face 'dg-context-note-label 'font-lock-face 'dg-context-note-label)
+                 (format "%s\n" context-note)))))
+    ;; Node content (transclusion style)
+    (let ((content (dg--fetch-node-content target-id)))
+      (when (and content (not (string-empty-p content)))
+        (insert "#+begin_quote\n")
+        (insert content)
+        (unless (string-suffix-p "\n" content)
+          (insert "\n"))
+        (insert "#+end_quote\n")))))
 
 (defun dg-context-toggle ()
   "Toggle discourse context side window."
