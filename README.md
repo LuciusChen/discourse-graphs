@@ -27,7 +27,8 @@ This approach, developed by [Joel Chan](https://joelchan.me/) for Roam Research,
 - **SQLite-backed storage** — Fast queries even with thousands of nodes
 - **Context panel with transclusion** — See related nodes with their full content inline
 - **Inline overlays** — `[+3/-1]` shows support/oppose counts on headings
-- **Query builder** — Find nodes by type and relation patterns
+- **Argumentation analysis** — Dynamic blocks for synthesis, gaps, and unanswered objections
+- **Customizable attributes** — Formula DSL for computing node metrics
 - **Smart relation creation** — Suggests relation types based on node types
 - **Denote compatible** — Works with denote file naming conventions
 - **Export** — Graphviz SVG and Markdown export
@@ -114,13 +115,41 @@ You can add context notes to explain **why** a relation exists. These appear in 
 |-----|---------|-------------|
 | `C-c d d` | `dg-menu` | Open main menu |
 | `C-c d c` | `dg-create-node` | Create a new node |
-| `C-c d d C` | `dg-convert-to-node` | Convert heading to node |
 | `C-c d r` | `dg-link` | Add relation (smart defaults) |
 | `C-c d x` | `dg-context-toggle` | Toggle context panel |
 | `C-c d g` | `dg-goto-node` | Jump to a node |
 | `C-c d !` | `dg-rebuild-cache` | Rebuild database |
 
 All commands are also available via `C-c d d` (transient menu).
+
+## Menu Structure
+
+Press `C-c d d` to open the main menu:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Discourse Graph                                             │
+├─────────────────────────────────────────────────────────────┤
+│ Create          │ Relations        │ Navigate               │
+│  c Create node  │  r Add relation  │  g Go to node          │
+│  C Convert head │  D Remove rel    │  x Toggle context      │
+│  q Question     │                  │  b Go back             │
+│  l Claim        │                  │  p Graph preview       │
+│  e Evidence     │                  │                        │
+│  s Source       │                  │                        │
+├─────────────────────────────────────────────────────────────┤
+│ Analysis        │ Export                                    │
+│  S Synthesis    │  E s SVG                                  │
+│  A Analyze Q    │  E m Markdown                             │
+│  ? Query node   │                                           │
+├─────────────────────────────────────────────────────────────┤
+│ Maintain        │ Display                                   │
+│  ! Rebuild      │  o Toggle overlays                        │
+│  v Validate     │  d Detailed overlay                       │
+│                 │  D Simple overlay                         │
+│                 │  W Configure...                           │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Context Panel
 
@@ -130,28 +159,19 @@ The context panel (`C-c d x`) displays related nodes with their **full content**
 #+title: [CLM] Social media amplifies divisive content [+2/-1]
 #+property: id e5f6g7h8
 
-*  Answers
+* → Answers
 ** Does social media increase polarization? :QUE:
 [[dg:a1b2c3d4]]
 #+begin_quote
-This is the main research question we're exploring. We want to understand
-the relationship between social media use and political polarization...
+This is the main research question we're exploring...
 #+end_quote
 
-*  Supported By
+* ← Supported By
 ** Study shows 40% increase... :EVD:
 [[dg:i9j0k1l2]]
 [SUPPORTS_NOTE] This study provides quantitative evidence for algorithm-driven amplification
 #+begin_quote
-Randomized controlled trial with 500 participants across 3 age groups.
-
-Methodology:
-- Double-blind placebo-controlled design
-- Cognitive battery administered at 30, 60, 90 minutes
-
-Results:
-- Attention tasks: d=0.8, p<0.001
-- Working memory: d=0.4, p<0.01
+Randomized controlled trial with 500 participants...
 #+end_quote
 ```
 
@@ -160,7 +180,7 @@ Features:
 - **Auto-updates** as you navigate between nodes
 - **Foldable** — Use `TAB` to collapse/expand individual nodes
 - **Click links** to jump to related nodes
-- **Press `l`** to go back in history
+- **Press `b`** to go back in history
 - **`[TYPE_NOTE]`** shows why relations exist
 
 ## Creating Relations
@@ -203,21 +223,70 @@ To convert an existing org heading to a discourse graph node:
 This will:
 - Create an ID if one doesn't exist
 - Add the `DG_TYPE` property
-- Update the database
+- Update the database on save
 
-## Querying
+## Analysis
 
-### Query current node
+### Synthesis Dashboard
+`C-c d d` then `S` — Open argumentation analysis dashboard with:
+- Research health overview
+- Unanswered objections
+- Structural gaps in arguments
+
+### Analyze Question
+`C-c d d` then `A` — Create detailed analysis for a specific question, showing:
+- All answers ranked by argument strength
+- Supporting and opposing evidence for each answer
+- Structural gaps (missing sources, unanswered objections)
+
+### Query Relations
 `C-c d d` then `?` — Shows all relations for the node at point
 
-### Query builder
-`C-c d d` then `/` — Build complex queries:
-- Filter by source type (e.g., all Claims)
-- Filter by relation (e.g., that support something)
-- Filter by target type (e.g., supported by Evidence)
+### Dynamic Blocks
 
-### Node index
-`C-c d d` then `i` — Browse all nodes, filter by type, sort by score
+Use org-mode dynamic blocks for live analysis. Press `C-c C-c` on a block to update.
+
+```org
+#+BEGIN: dg-synthesis :id "question-node-id"
+;; Or use :question "Question title text"
+;; Analyzes all answers with evidence structure
+;; Shows: Answer | Status | +Ev | -Ev | Gaps
+#+END:
+
+#+BEGIN: dg-unanswered-opposition :limit 20
+;; Claims with objections that lack adequate responses
+#+END:
+
+#+BEGIN: dg-argument-gaps :limit 30
+;; Claims missing evidence or sources
+#+END:
+
+#+BEGIN: dg-overview
+;; Research health statistics:
+;; - Questions (open/answered)
+;; - Claims (with structural gaps)
+;; - Evidence and Sources counts
+#+END:
+```
+
+#### Argument Strength Assessment
+
+The synthesis analysis categorizes answers by structural strength:
+
+| Status | Meaning |
+|--------|---------|
+| ✓ Supported | Has supporting evidence, no unanswered opposition |
+| ⚡ Contested | Has both support and opposition |
+| ⚠ Challenged | Opposition outweighs support |
+| ✗ Unsupported | No supporting evidence |
+
+#### Structural Gaps
+
+The system detects these argument weaknesses:
+
+- **no-support** — Claim has no supporting evidence
+- **no-source** — Evidence lacks source citations
+- **unanswered-opposition** — Objections without adequate responses
 
 ## Configuration
 
@@ -243,9 +312,39 @@ This will:
 ;; Maximum lines to display per node in context panel (nil for unlimited)
 (setq dg-context-max-lines 30)
 
+;; Overlay format function
+;; Options: #'dg-default-overlay-format or #'dg-detailed-overlay-format
+(setq dg-overlay-format-function #'dg-default-overlay-format)
+
+;; Synthesis dashboard file location
+(setq dg-synthesis-file "~/org/research/synthesis.org")
+
 ;; Use with denote
 (setq dg-use-denote t)
 ```
+
+### Customizing Attributes
+
+You can customize how attributes are computed using formula DSL:
+
+```elisp
+(setq dg-discourse-attributes
+  '((claim
+     . ((evidence-score . "{count:Supported By:evidence} - {count:Opposed By:evidence}")
+        (robustness . "{count:Supported By:evidence} + {count:Supported By:claim}*0.5 - {count:Opposed By:evidence}")
+        (overlay . evidence-score)))
+    (question
+     . ((answer-count . "{count:Answered By:claim}")
+        (overlay . answer-count)))
+    ;; ... more types
+    ))
+```
+
+Formula syntax:
+- `{count:RELATION:TYPE}` — Count relations
+- `{sum:RELATION:TYPE:ATTR}` — Sum attribute from related nodes
+- `{avg:RELATION:TYPE:ATTR}` — Average attribute
+- Math operations: `+ - * /` and parentheses
 
 ## Export
 
@@ -269,10 +368,7 @@ The SVG uses CSS variables for colors, making it suitable for light/dark mode:
 | Command | Description |
 |---------|-------------|
 | `dg-rebuild-cache` | Rebuild entire database |
-| `dg-validate` | Check for broken links |
-| `dg-cleanup-dangling` | Remove orphaned relations |
-| `dg-find-orphan-nodes` | Find nodes without relations |
-| `dg-stats` | Show graph statistics |
+| `dg-validate` | Check for broken links and missing files |
 
 ## Workflow Tips
 
@@ -281,19 +377,25 @@ The SVG uses CSS variables for colors, making it suitable for light/dark mode:
 2. As you read papers, create **Source** nodes
 3. Extract **Evidence** from sources (link with `DG_INFORMS`)
 4. Formulate **Claims** that synthesize evidence
-5. Use context panel to see the argument structure
+5. Use `S` (Synthesis) to see the argument structure
 
 ### Building Arguments
 1. Start with a **Claim** you want to support
-2. Create **Evidence** nodes that support it (`C-c d r`  supports)
-3. Note opposing evidence too (`C-c d r`  opposes)
-4. Query to see the balance: how much support vs opposition?
+2. Create **Evidence** nodes that support it (`C-c d r` → supports)
+3. Note opposing evidence too (`C-c d r` → opposes)
+4. Use `dg-synthesis` dblock to see the balance of evidence
+
+### Identifying Gaps
+1. Open Synthesis dashboard (`C-c d d S`)
+2. Check "Unanswered Objections" — claims needing more support
+3. Check "Structural Gaps" — arguments missing evidence or sources
+4. Address gaps by adding evidence or sources
 
 ### Daily Use
 1. Keep context panel open (`C-c d x`)
 2. As you navigate, context auto-updates
 3. Use `C-c d g` to quickly jump to any node
-4. Use query builder to find patterns in your notes
+4. Periodically run Synthesis to check research health
 
 ## Comparison with Roam Discourse Graph
 
@@ -302,10 +404,11 @@ The SVG uses CSS variables for colors, making it suitable for light/dark mode:
 | Node types | ✓ | ✓ |
 | Relations | ✓ | ✓ |
 | Context panel | ✓ | ✓ |
-| Query builder | ✓ | ✓ |
+| Transclusion | ✓ | ✓ (in context panel) |
+| Argumentation analysis | ✗ | ✓ |
+| Custom attributes | ✗ | ✓ |
 | Block-level nodes | ✓ | ✗ (heading-level) |
 | Interactive graph | ✓ | ✗ (static export) |
-| Transclusion | ✓ | ✓ (in context panel) |
 | Offline/local | ✗ | ✓ |
 | Plain text | ✗ | ✓ |
 | Customizable | Limited | ✓ (it's Emacs) |
