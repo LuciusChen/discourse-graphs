@@ -160,11 +160,6 @@ Set to nil to disable auto-formatting."
   :type 'boolean
   :group 'discourse-graph)
 
-(defcustom dg-queries-file
-  (expand-file-name "dg-saved-queries.el" user-emacs-directory)
-  "File to save discourse graph queries."
-  :type 'file
-  :group 'discourse-graph)
 
 (defcustom dg-export-link-style 'wikilink
   "Link style for markdown export.
@@ -181,12 +176,6 @@ Set to nil to disable auto-formatting."
 
 (defvar dg--context-buffer-name "*DG Context*"
   "Name of the discourse context buffer.")
-
-(defvar dg--index-buffer-name "*DG Index*"
-  "Name of the node index buffer.")
-
-(defvar dg--query-buffer-name "*DG Query*"
-  "Name of the query results buffer.")
 
 (defvar dg--current-node-id nil
   "ID of currently displayed node in context buffer.")
@@ -701,47 +690,409 @@ Each relation is (direction rel_type node_id title type context_note)."
   (dg-find-incoming claim-id 'opposes))
 
 ;;; ============================================================
-;;; Discourse Attributes (Computed Properties)
+;;; Helper Functions
 ;;; ============================================================
 
-(defun dg-attr-support-count (id)
-  "Count nodes that support ID."
-  (or (caar (sqlite-select
-             (dg--db)
-             "SELECT COUNT(*) FROM relations
-              WHERE target_id = ? AND rel_type = 'supports'"
-             (list id)))
-      0))
+(defun dg--node-type-short (node)
+  "Get short type indicator for NODE (plist or id string).
+Returns \"?\" if type not found."
+  (let* ((node-plist (if (stringp node) (dg-get node) node))
+         (type-str (and node-plist (plist-get node-plist :type)))
+         (type-sym (and type-str (intern type-str)))
+         (type-info (and type-sym (alist-get type-sym dg-node-types))))
+    (or (plist-get type-info :short) "?")))
 
-(defun dg-attr-oppose-count (id)
-  "Count nodes that oppose ID."
-  (or (caar (sqlite-select
-             (dg--db)
-             "SELECT COUNT(*) FROM relations
-              WHERE target_id = ? AND rel_type = 'opposes'"
-             (list id)))
-      0))
+(defun dg--node-type-color (node)
+  "Get color for NODE (plist or id string).
+Returns \"gray\" if not found."
+  (let* ((node-plist (if (stringp node) (dg-get node) node))
+         (type-str (and node-plist (plist-get node-plist :type)))
+         (type-sym (and type-str (intern type-str)))
+         (type-info (and type-sym (alist-get type-sym dg-node-types))))
+    (or (plist-get type-info :color) "gray")))
 
-(defun dg-attr-evidence-score (id)
-  "Calculate evidence score: supports - opposes."
-  (- (dg-attr-support-count id)
-     (dg-attr-oppose-count id)))
+(defun dg--format-node-choice (node)
+  "Format NODE for completing-read display."
+  (format "[%s] %s" (dg--node-type-short node) (plist-get node :title)))
 
-(defun dg-attr-answer-count (id)
-  "Count answers to question ID."
-  (or (caar (sqlite-select
-             (dg--db)
-             "SELECT COUNT(*) FROM relations
-              WHERE target_id = ? AND rel_type = 'answers'"
-             (list id)))
-      0))
+;;; ============================================================
+;;; Discourse Attributes (Customizable Formula System)
+;;; ============================================================
+
+;; This system allows custom attribute formulas using a DSL.
+;;
+;; Formula syntax:
+;;   {count:RELATION:TYPE}     - Count relations
+;;   {sum:RELATION:TYPE:ATTR}  - Sum attribute values from related nodes
+;;   {avg:RELATION:TYPE:ATTR}  - Average attribute values
+;;
+;; Relation names:
+;;   Outgoing: supports, opposes, informs, answers
+;;   Incoming: Supported By, Opposed By, Informed By, Answered By
+
+(defcustom dg-discourse-attributes
+  '((claim
+     . ((evidence-score
+         . "{count:Supported By:evidence} - {count:Opposed By:evidence}")
+        (robustness
+         . "{count:Supported By:evidence} + {count:Supported By:claim}*0.5 - {count:Opposed By:evidence} - {count:Opposed By:claim}*0.5")
+        (total-support
+         . "{count:Supported By:evidence} + {count:Supported By:claim}")
+        (overlay . evidence-score)))
+    (question
+     . ((answer-count
+         . "{count:Answered By:claim}")
+        (informed-count
+         . "{count:Informed By:evidence} + {count:Informed By:source}")
+        (overlay . answer-count)))
+    (evidence
+     . ((source-count
+         . "{count:informs:source}")
+        (supports-count
+         . "{count:supports:claim}")
+        (overlay . nil)))
+    (source
+     . ((usage-count
+         . "{count:Informed By:evidence}")
+        (overlay . usage-count))))
+  "Discourse attributes configuration for each node type.
+
+Each node type maps to an alist of (ATTR-NAME . FORMULA) pairs.
+The special key `overlay' specifies which attribute to show in the
+heading overlay (nil for none).
+
+Formula syntax:
+  {count:RELATION:TYPE}     - Count incoming/outgoing relations
+  {sum:RELATION:TYPE:ATTR}  - Sum attribute from related nodes
+  {avg:RELATION:TYPE:ATTR}  - Average attribute from related nodes
+
+Relation names:
+  Outgoing: supports, opposes, informs, answers
+  Incoming: Supported By, Opposed By, Informed By, Answered By
+
+Math operations: + - * / and parentheses are supported."
+  :type '(alist :key-type symbol
+                :value-type (alist :key-type symbol
+                                   :value-type string))
+  :group 'discourse-graph)
+
+(defcustom dg-overlay-format-function #'dg-default-overlay-format
+  "Function to format overlay string from attributes.
+Called with (attributes node-type) and should return a string or nil."
+  :type 'function
+  :group 'discourse-graph)
+(defconst dg--relation-map
+  '(;; Incoming relations (from target's perspective)
+    ("Supported By" . (:rel "supports" :dir incoming))
+    ("Opposed By"   . (:rel "opposes"  :dir incoming))
+    ("Informed By"  . (:rel "informs"  :dir incoming))
+    ("Answered By"  . (:rel "answers"  :dir incoming))
+    ;; Outgoing relations
+    ("supports"     . (:rel "supports" :dir outgoing))
+    ("opposes"      . (:rel "opposes"  :dir outgoing))
+    ("informs"      . (:rel "informs"  :dir outgoing))
+    ("answers"      . (:rel "answers"  :dir outgoing)))
+  "Map relation names to internal representation.")
+
+(defvar dg--parser-tokens nil "Current token list during parsing.")
+
+(defun dg--parse-formula (formula)
+  "Parse FORMULA string into an S-expression for evaluation.
+Returns a form that can be evaluated with `dg--eval-formula'."
+  (setq dg--parser-tokens (dg--tokenize-formula formula))
+  (let ((result (dg--parse-expr)))
+    (when dg--parser-tokens
+      (error "Unexpected tokens at end: %S" dg--parser-tokens))
+    result))
+
+(defun dg--tokenize-formula (formula)
+  "Tokenize FORMULA into a list of tokens."
+  (let ((pos 0)
+        (len (length formula))
+        (tokens '()))
+    (while (< pos len)
+      (let ((char (aref formula pos)))
+        (cond
+         ;; Skip whitespace
+         ((memq char '(?\s ?\t ?\n))
+          (setq pos (1+ pos)))
+         ;; Function call {op:rel:type} or {op:rel:type:attr}
+         ((= char ?{)
+          (let ((end (string-match "}" formula pos)))
+            (unless end
+              (error "Unclosed { in formula at position %d" pos))
+            (let* ((content (substring formula (1+ pos) end))
+                   (parts (split-string content ":")))
+              (push (dg--parse-function parts) tokens)
+              (setq pos (1+ end)))))
+         ;; Operators
+         ((= char ?+) (push '+ tokens) (setq pos (1+ pos)))
+         ((= char ?-) (push '- tokens) (setq pos (1+ pos)))
+         ((= char ?*) (push '* tokens) (setq pos (1+ pos)))
+         ((= char ?/) (push '/ tokens) (setq pos (1+ pos)))
+         ;; Parentheses
+         ((= char ?\() (push 'lparen tokens) (setq pos (1+ pos)))
+         ((= char ?\)) (push 'rparen tokens) (setq pos (1+ pos)))
+         ;; Number
+         ((or (and (>= char ?0) (<= char ?9))
+              (and (= char ?.) (< (1+ pos) len)
+                   (let ((next (aref formula (1+ pos))))
+                     (and (>= next ?0) (<= next ?9)))))
+          (let ((start pos))
+            (while (and (< pos len)
+                        (let ((c (aref formula pos)))
+                          (or (and (>= c ?0) (<= c ?9))
+                              (= c ?.))))
+              (setq pos (1+ pos)))
+            (push (string-to-number (substring formula start pos)) tokens)))
+         (t
+          (error "Unexpected character '%c' at position %d" char pos)))))
+    (nreverse tokens)))
+
+(defun dg--parse-function (parts)
+  "Parse function PARTS into a function spec."
+  (let ((op (intern (downcase (nth 0 parts))))
+        (rel (nth 1 parts))
+        (type (and (nth 2 parts) (downcase (nth 2 parts))))
+        (attr (and (nth 3 parts) (intern (nth 3 parts)))))
+    (unless (memq op '(count sum avg average))
+      (error "Unknown operation: %s (expected count, sum, avg)" op))
+    (when (eq op 'average) (setq op 'avg))
+    (list 'func op rel type attr)))
+
+(defun dg--parser-peek ()
+  "Peek at the next token without consuming it."
+  (car dg--parser-tokens))
+
+(defun dg--parser-consume ()
+  "Consume and return the next token."
+  (pop dg--parser-tokens))
+
+(defun dg--parse-expr ()
+  "Parse expression (handles + and -)."
+  (let ((left (dg--parse-term)))
+    (while (memq (dg--parser-peek) '(+ -))
+      (let ((op (dg--parser-consume)))
+        (setq left (list op left (dg--parse-term)))))
+    left))
+
+(defun dg--parse-term ()
+  "Parse term (handles * and /)."
+  (let ((left (dg--parse-factor)))
+    (while (memq (dg--parser-peek) '(* /))
+      (let ((op (dg--parser-consume)))
+        (setq left (list op left (dg--parse-factor)))))
+    left))
+
+(defun dg--parse-factor ()
+  "Parse factor (handles parentheses and atoms)."
+  (let ((tok (dg--parser-peek)))
+    (cond
+     ((null tok)
+      (error "Unexpected end of formula"))
+     ((numberp tok)
+      (dg--parser-consume))
+     ((eq tok 'lparen)
+      (dg--parser-consume)  ; consume '('
+      (let ((expr (dg--parse-expr)))
+        (unless (eq (dg--parser-consume) 'rparen)
+          (error "Missing closing parenthesis"))
+        expr))
+     ((and (listp tok) (eq (car tok) 'func))
+      (dg--parser-consume))
+     ((eq tok '-)
+      ;; Unary minus
+      (dg--parser-consume)
+      (list '- 0 (dg--parse-factor)))
+     (t
+      (error "Unexpected token: %S" tok)))))
+
+(defun dg--eval-formula (expr id &optional attr-cache)
+  "Evaluate formula EXPR for node ID.
+ATTR-CACHE is an optional hash table for memoizing attribute lookups."
+  (cond
+   ((numberp expr) expr)
+   ((and (listp expr) (eq (car expr) 'func))
+    (dg--eval-function (cdr expr) id attr-cache))
+   ((and (listp expr) (memq (car expr) '(+ - * /)))
+    (let ((op (car expr))
+          (left (dg--eval-formula (nth 1 expr) id attr-cache))
+          (right (dg--eval-formula (nth 2 expr) id attr-cache)))
+      (pcase op
+        ('+ (+ left right))
+        ('- (- left right))
+        ('* (* left right))
+        ('/ (if (zerop right) 0 (/ left right))))))
+   (t (error "Invalid expression: %S" expr))))
+
+(defun dg--eval-function (spec id &optional attr-cache)
+  "Evaluate function SPEC for node ID."
+  (let* ((op (nth 0 spec))
+         (rel-name (nth 1 spec))
+         (node-type (nth 2 spec))
+         (attr-name (nth 3 spec))
+         (rel-info (cdr (assoc rel-name dg--relation-map)))
+         (rel-type (plist-get rel-info :rel))
+         (direction (plist-get rel-info :dir)))
+    (unless rel-info
+      (error "Unknown relation: %s" rel-name))
+    (pcase op
+      ('count
+       (dg--count-relations id rel-type direction node-type))
+      ((or 'sum 'avg)
+       (dg--aggregate-attribute id rel-type direction node-type attr-name op attr-cache))
+      (_ (error "Unknown operation: %s" op)))))
+
+(defun dg--count-relations (id rel-type direction &optional node-type)
+  "Count relations for ID of REL-TYPE in DIRECTION, optionally filtered by NODE-TYPE."
+  (let ((sql (if (eq direction 'incoming)
+                 (if node-type
+                     "SELECT COUNT(*) FROM relations r
+                      JOIN nodes n ON r.source_id = n.id
+                      WHERE r.target_id = ? AND r.rel_type = ? AND n.type = ?"
+                   "SELECT COUNT(*) FROM relations
+                    WHERE target_id = ? AND rel_type = ?")
+               (if node-type
+                   "SELECT COUNT(*) FROM relations r
+                    JOIN nodes n ON r.target_id = n.id
+                    WHERE r.source_id = ? AND r.rel_type = ? AND n.type = ?"
+                 "SELECT COUNT(*) FROM relations
+                  WHERE source_id = ? AND rel_type = ?")))
+        (params (if node-type
+                    (list id rel-type node-type)
+                  (list id rel-type))))
+    (or (caar (sqlite-select (dg--db) sql params)) 0)))
+
+(defun dg--aggregate-attribute (id rel-type direction node-type attr-name op &optional attr-cache)
+  "Aggregate ATTR-NAME from related nodes using OP (sum or avg).
+Related nodes are found via REL-TYPE in DIRECTION, filtered by NODE-TYPE."
+  (let* ((sql (if (eq direction 'incoming)
+                  (if node-type
+                      "SELECT r.source_id FROM relations r
+                       JOIN nodes n ON r.source_id = n.id
+                       WHERE r.target_id = ? AND r.rel_type = ? AND n.type = ?"
+                    "SELECT source_id FROM relations
+                     WHERE target_id = ? AND rel_type = ?")
+                (if node-type
+                    "SELECT r.target_id FROM relations r
+                     JOIN nodes n ON r.target_id = n.id
+                     WHERE r.source_id = ? AND r.rel_type = ? AND n.type = ?"
+                  "SELECT target_id FROM relations
+                   WHERE source_id = ? AND rel_type = ?")))
+         (params (if node-type (list id rel-type node-type) (list id rel-type)))
+         (related-ids (mapcar #'car (sqlite-select (dg--db) sql params)))
+         (values (mapcar (lambda (rid)
+                           (dg-compute-attribute rid attr-name attr-cache))
+                         related-ids)))
+    (if (null values)
+        0
+      (pcase op
+        ('sum (apply #'+ values))
+        ('avg (/ (apply #'+ values) (float (length values))))))))
+
+(defun dg-compute-attribute (id attr-name &optional attr-cache)
+  "Compute attribute ATTR-NAME for node ID.
+Uses ATTR-CACHE if provided to avoid recomputation."
+  (let ((cache-key (cons id attr-name)))
+    (if (and attr-cache (gethash cache-key attr-cache))
+        (gethash cache-key attr-cache)
+      (let* ((node (dg-get id))
+             (node-type (and node (intern (plist-get node :type))))
+             (type-attrs (cdr (assq node-type dg-discourse-attributes)))
+             (formula-str (cdr (assq attr-name type-attrs)))
+             (result (if formula-str
+                         (let ((parsed (dg--parse-formula formula-str)))
+                           (dg--eval-formula parsed id attr-cache))
+                       0)))
+        (when attr-cache
+          (puthash cache-key result attr-cache))
+        result))))
+
+(defun dg-compute-all-attributes (id)
+  "Compute all defined attributes for node ID.
+Returns a plist of (:ATTR-NAME . VALUE) pairs using keywords."
+  (let* ((node (dg-get id))
+         (node-type (and node (intern (plist-get node :type))))
+         (type-attrs (cdr (assq node-type dg-discourse-attributes)))
+         (attr-cache (make-hash-table :test 'equal))
+         (results '()))
+    (dolist (attr-def type-attrs)
+      (let ((attr-name (car attr-def)))
+        (unless (eq attr-name 'overlay)
+          (let* ((value (dg-compute-attribute id attr-name attr-cache))
+                 ;; Convert symbol to keyword for plist compatibility
+                 (key (intern (concat ":" (symbol-name attr-name)))))
+            (setq results (plist-put results key value))))))
+    results))
+
+(defun dg-default-overlay-format (attrs node-type)
+  "Default overlay format function.
+ATTRS is a plist of computed attributes, NODE-TYPE is the node type symbol."
+  (let* ((type-config (cdr (assq node-type dg-discourse-attributes)))
+         (overlay-attr (cdr (assq 'overlay type-config))))
+    (when overlay-attr
+      ;; Convert symbol to keyword for plist lookup
+      (let* ((overlay-key (intern (concat ":" (symbol-name overlay-attr))))
+             (value (plist-get attrs overlay-key)))
+        (when (and value (not (zerop value)))
+          (cond
+           ;; For evidence-score style: show +N or -N or +N/-M
+           ((memq overlay-attr '(evidence-score robustness))
+            (let ((supp (or (plist-get attrs :total-support)
+                            (plist-get attrs :support-count)
+                            0))
+                  (opp (or (plist-get attrs :oppose-count) 0)))
+              (cond
+               ((and (> supp 0) (> opp 0))
+                (format "[+%d/-%d]" supp opp))
+               ((> supp 0)
+                (format "[+%d]" supp))
+               ((> opp 0)
+                (format "[-%d]" opp))
+               ((not (zerop value))
+                (format "[%+d]" (round value))))))
+           ;; For counts: show the count
+           ((string-match-p "-count$" (symbol-name overlay-attr))
+            (format "[%d]" (round value)))
+           ;; Generic: show signed value
+           (t
+            (if (>= value 0)
+                (format "[+%.0f]" value)
+              (format "[%.0f]" value)))))))))
+
+(defun dg-detailed-overlay-format (attrs node-type)
+  "Detailed overlay format showing multiple attributes.
+Shows [+S/-O ?A ~I] format."
+  (let* ((supp (or (plist-get attrs :total-support)
+                   (plist-get attrs :support-count)
+                   (plist-get attrs :evidence-score)
+                   0))
+         (opp (or (plist-get attrs :oppose-count) 0))
+         (ans (or (plist-get attrs :answer-count) 0))
+         (inf (or (plist-get attrs :informed-count)
+                  (plist-get attrs :source-count)
+                  0))
+         (parts '()))
+    (when (> inf 0) (push (format "~%d" (round inf)) parts))
+    (when (> ans 0) (push (format "?%d" (round ans)) parts))
+    (when (> opp 0) (push (format "-%d" (round opp)) parts))
+    (when (> supp 0) (push (format "+%d" (round supp)) parts))
+    (when parts
+      (format "[%s]" (string-join parts " ")))))
 
 (defun dg-get-all-attributes (id)
-  "Get all computed attributes for ID."
-  (list :support-count (dg-attr-support-count id)
-        :oppose-count (dg-attr-oppose-count id)
-        :evidence-score (dg-attr-evidence-score id)
-        :answer-count (dg-attr-answer-count id)))
+  "Get all computed attributes for ID.
+This overrides the original function to use customizable formulas."
+  (let ((attrs (dg-compute-all-attributes id)))
+    ;; Also include legacy attributes for backward compatibility
+    (unless (plist-get attrs :support-count)
+      (setq attrs (plist-put attrs :support-count
+                             (dg--count-relations id "supports" 'incoming nil))))
+    (unless (plist-get attrs :oppose-count)
+      (setq attrs (plist-put attrs :oppose-count
+                             (dg--count-relations id "opposes" 'incoming nil))))
+    attrs))
+
 
 (defun dg-get-summary (id)
   "Get summary for node ID.
@@ -854,49 +1205,6 @@ Content is truncated according to `dg-context-max-lines'."
 
 
 ;;; ============================================================
-;;; Statistics
-;;; ============================================================
-
-(defun dg-stats ()
-  "Display discourse graph statistics."
-  (interactive)
-  (let ((node-count (caar (sqlite-select (dg--db) "SELECT COUNT(*) FROM nodes")))
-        (rel-count (caar (sqlite-select (dg--db) "SELECT COUNT(*) FROM relations")))
-        (type-stats (sqlite-select (dg--db)
-                                   "SELECT type, COUNT(*) FROM nodes GROUP BY type ORDER BY type"))
-        (rel-stats (sqlite-select (dg--db)
-                                  "SELECT rel_type, COUNT(*) FROM relations GROUP BY rel_type ORDER BY rel_type"))
-        (file-count (caar (sqlite-select (dg--db)
-                                         "SELECT COUNT(DISTINCT file) FROM nodes"))))
-    (with-current-buffer (get-buffer-create "*DG Stats*")
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize "Discourse Graph Statistics\n"
-                            'face '(:weight bold :height 1.3)))
-        (insert (make-string 40 ?═) "\n\n")
-        (insert (format "Total nodes:     %d\n" node-count))
-        (insert (format "Total relations: %d\n" rel-count))
-        (insert (format "Files indexed:   %d\n\n" file-count))
-        (insert (propertize "Nodes by Type\n" 'face '(:weight bold)))
-        (insert (make-string 20 ?─) "\n")
-        (dolist (row type-stats)
-          (let* ((type (intern (car row)))
-                 (count (cadr row))
-                 (info (alist-get type dg-node-types)))
-            (insert (format "  %s %-10s %4d\n"
-                            (plist-get info :short)
-                            (car row)
-                            count))))
-        (insert (format "\n"))
-        (insert (propertize "Relations by Type\n" 'face '(:weight bold)))
-        (insert (make-string 20 ?─) "\n")
-        (dolist (row rel-stats)
-          (insert (format "  %-12s %4d\n" (car row) (cadr row))))
-        (goto-char (point-min)))
-      (special-mode)
-      (pop-to-buffer (current-buffer)))))
-
-;;; ============================================================
 ;;; Discourse Context Panel
 ;;; ============================================================
 
@@ -920,12 +1228,11 @@ Content is truncated according to `dg-context-max-lines'."
          (attrs (dg-get-all-attributes id))
          (outgoing (plist-get rels :outgoing))
          (incoming (plist-get rels :incoming))
-         (node-type (plist-get node :type))
-         (type-sym (intern (or node-type "")))
-         (type-info (alist-get type-sym dg-node-types))
+         (node-type-str (plist-get node :type))
+         (node-type (and node-type-str (intern node-type-str)))
+         (type-info (alist-get node-type dg-node-types))
          (short (or (plist-get type-info :short) "?"))
-         (supp (plist-get attrs :support-count))
-         (opp (plist-get attrs :oppose-count)))
+         (stats-str (funcall dg-overlay-format-function attrs node-type)))
     (with-current-buffer (get-buffer-create dg--context-buffer-name)
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -939,17 +1246,12 @@ Content is truncated according to `dg-context-max-lines'."
                             prev-id
                             (truncate-string-to-width prev-title 28 nil nil "…")))))
 
-        ;; Header with stats inline (like overlay)
+        ;; Header with stats inline (consistent with overlay)
         (insert (format "#+title: [%s] %s"
                         short
                         (or (plist-get node :title) "Unknown")))
-        (cond
-         ((and (> supp 0) (> opp 0))
-          (insert (format " [+%d -%d]" supp opp)))
-         ((> supp 0)
-          (insert (format " [+%d]" supp)))
-         ((> opp 0)
-          (insert (format " [-%d]" opp))))
+        (when stats-str
+          (insert " " stats-str))
         (insert "\n")
         (insert (format "#+property: id %s\n" id))
 
@@ -1079,86 +1381,7 @@ Key bindings:
   (setq-local cursor-type 'box))
 
 ;;; ============================================================
-;;; Node Index
-;;; ============================================================
-
-(defun dg-node-index (&optional type sort-by)
-  "Display index of nodes, optionally filtered by TYPE and sorted by SORT-BY."
-  (interactive
-   (list (when current-prefix-arg
-           (intern (completing-read "Type (empty for all): "
-                                    (cons "" (mapcar #'car dg-node-types))
-                                    nil nil)))
-         (intern (completing-read "Sort by: "
-                                  '("title" "evidence-score" "support-count" "type")
-                                  nil nil "title"))))
-  (let* ((nodes (if (and type (not (string-empty-p (symbol-name type))))
-                    (dg-find-by-type type)
-                  (dg-all-nodes)))
-         ;; Add attributes
-         (nodes-with-attrs
-          (mapcar (lambda (n)
-                    (let ((id (plist-get n :id)))
-                      (append n (list :attrs (dg-get-all-attributes id)))))
-                  nodes))
-         ;; Sort
-         (sorted
-          (pcase sort-by
-            ('title
-             (seq-sort-by (lambda (n) (downcase (plist-get n :title))) #'string< nodes-with-attrs))
-            ('evidence-score
-             (seq-sort-by (lambda (n) (plist-get (plist-get n :attrs) :evidence-score))
-                          #'> nodes-with-attrs))
-            ('support-count
-             (seq-sort-by (lambda (n) (plist-get (plist-get n :attrs) :support-count))
-                          #'> nodes-with-attrs))
-            ('type
-             (seq-sort-by (lambda (n) (or (plist-get n :type) "")) #'string< nodes-with-attrs))
-            (_ nodes-with-attrs))))
-    (with-current-buffer (get-buffer-create dg--index-buffer-name)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize (format "Node Index%s (%d nodes)\n"
-                                    (if type (format " [%s]" type) "")
-                                    (length sorted))
-                            'face '(:weight bold :height 1.2)))
-        (insert (make-string 70 ?═) "\n")
-        ;; Table header
-        (insert (propertize
-                 (format "%-3s %-45s %5s %5s %5s\n"
-                         "T" "Title" "Supp" "Opp" "Score")
-                 'face '(:weight bold)))
-        (insert (make-string 70 ?─) "\n")
-        ;; Rows
-        (dolist (node sorted)
-          (let* ((id (plist-get node :id))
-                 (ntype-str (plist-get node :type))
-                 (ntype-sym (and ntype-str (intern ntype-str)))
-                 (type-info (and ntype-sym (alist-get ntype-sym dg-node-types)))
-                 (short (or (plist-get type-info :short) "?"))
-                 (title (truncate-string-to-width
-                         (plist-get node :title) 43 nil nil "…"))
-                 (attrs (plist-get node :attrs))
-                 (supp (plist-get attrs :support-count))
-                 (opp (plist-get attrs :oppose-count))
-                 (score (plist-get attrs :evidence-score)))
-            (insert (propertize (format "%-3s " short) 'face 'font-lock-type-face))
-            (insert-text-button
-             (format "%-45s" title)
-             'action (lambda (_) (dg-goto-node-by-id id))
-             'node-id id
-             'face 'link)
-            (insert (format " %5d %5d %+5d\n" supp opp score))))
-        (goto-char (point-min)))
-      (dg-index-mode)
-      (pop-to-buffer (current-buffer)))))
-
-(define-derived-mode dg-index-mode special-mode "DG-Index"
-  "Major mode for discourse graph node index."
-  (setq-local truncate-lines t))
-
-;;; ============================================================
-;;; Query Builder
+;;; Query Relations
 ;;; ============================================================
 
 (defun dg-query-relations ()
@@ -1167,30 +1390,16 @@ More intuitive: select a node, pick relation type, see results."
   (interactive)
   (let* ((current-id (dg--get-id-at-point))
          (use-current (and current-id
-                           (y-or-n-p (format "Query from current node? "))))
+                           (y-or-n-p "Query from current node? ")))
          (node-id (if use-current
                       current-id
                     (let* ((all-nodes (dg-all-nodes))
-                           (choice (completing-read
-                                    "Select node: "
-                                    (mapcar (lambda (n)
-                                              (let* ((type-str (plist-get n :type))
-                                                     (type-sym (and type-str (intern type-str)))
-                                                     (type-info (and type-sym (alist-get type-sym dg-node-types)))
-                                                     (short (or (plist-get type-info :short) "?")))
-                                                (cons (format "[%s] %s" short (plist-get n :title))
-                                                      (plist-get n :id))))
-                                            all-nodes)
-                                    nil t)))
-                      (cdr (assoc choice
-                                  (mapcar (lambda (n)
-                                            (let* ((type-str (plist-get n :type))
-                                                   (type-sym (and type-str (intern type-str)))
-                                                   (type-info (and type-sym (alist-get type-sym dg-node-types)))
-                                                   (short (or (plist-get type-info :short) "?")))
-                                              (cons (format "[%s] %s" short (plist-get n :title))
-                                                    (plist-get n :id))))
-                                          all-nodes))))))
+                           (candidates (mapcar (lambda (n)
+                                                 (cons (dg--format-node-choice n)
+                                                       (plist-get n :id)))
+                                               all-nodes))
+                           (choice (completing-read "Select node: " candidates nil t)))
+                      (alist-get choice candidates nil nil #'equal))))
          (direction (intern (completing-read
                              "Direction: "
                              '("both" "outgoing" "incoming"))))
@@ -1231,112 +1440,26 @@ More intuitive: select a node, pick relation type, see results."
         (insert (format "#+title: Relations of: %s\n\n" (plist-get node :title)))
 
         (when outgoing
-          (insert (format "*  Outgoing (%d)\n" (length outgoing)))
+          (insert (format "*  Outgoing (%d)\n" (length outgoing)))
           (dolist (n outgoing)
-            (let* ((id (plist-get n :id))
-                   (title (plist-get n :title))
-                   (type-str (plist-get n :type))
-                   (type-sym (and type-str (intern type-str)))
-                   (type-info (and type-sym (alist-get type-sym dg-node-types)))
-                   (type-short (or (plist-get type-info :short) "?")))
-              (insert (format "** %s :%s:\n[[dg:%s]]\n" title type-short id)))))
+            (insert (format "** %s :%s:\n[[dg:%s]]\n"
+                            (plist-get n :title)
+                            (dg--node-type-short n)
+                            (plist-get n :id)))))
 
         (when incoming
-          (insert (format "*  Incoming (%d)\n" (length incoming)))
+          (insert (format "*  Incoming (%d)\n" (length incoming)))
           (dolist (n incoming)
-            (let* ((id (plist-get n :id))
-                   (title (plist-get n :title))
-                   (type-str (plist-get n :type))
-                   (type-sym (and type-str (intern type-str)))
-                   (type-info (and type-sym (alist-get type-sym dg-node-types)))
-                   (type-short (or (plist-get type-info :short) "?")))
-              (insert (format "** %s :%s:\n[[dg:%s]]\n" title type-short id)))))
+            (insert (format "** %s :%s:\n[[dg:%s]]\n"
+                            (plist-get n :title)
+                            (dg--node-type-short n)
+                            (plist-get n :id)))))
 
         (when (and (null outgoing) (null incoming))
           (insert "No relations found.\n"))
 
         (goto-char (point-min))
         (org-content 1)
-        (read-only-mode 1)))
-    (pop-to-buffer buf)))
-
-(defun dg-query-builder ()
-  "Interactive query builder for discourse graph.
-Find all nodes of a type, optionally filtered by relations."
-  (interactive)
-  (let* ((source-type (intern (completing-read
-                               "Find nodes of type: "
-                               (mapcar #'car dg-node-types))))
-         (add-rel (y-or-n-p "Add relation filter? "))
-         (rel-type (when add-rel
-                     (intern (completing-read
-                              "With relation: "
-                              (mapcar #'car dg-relation-types)))))
-         (rel-dir (when add-rel
-                    (intern (completing-read
-                             "Direction: "
-                             '("outgoing" "incoming")))))
-         (target-type (when add-rel
-                        (let ((sel (completing-read
-                                    "To/from type: "
-                                    (cons "any" (mapcar (lambda (x) (symbol-name (car x)))
-                                                        dg-node-types)))))
-                          (unless (string= sel "any")
-                            (intern sel)))))
-         (results (dg--execute-query source-type rel-type rel-dir target-type)))
-    (dg--display-query-results results
-                               (format "%s %s %s %s"
-                                       source-type
-                                       (or rel-type "")
-                                       (or rel-dir "")
-                                       (or target-type "any")))))
-
-(defun dg--execute-query (source-type &optional rel-type rel-dir target-type)
-  "Execute query with given parameters."
-  (let ((sql "SELECT DISTINCT n.id, n.type, n.title, n.file, n.pos, n.outline_path
-              FROM nodes n")
-        (conditions (list (format "n.type = '%s'" source-type)))
-        (joins ""))
-    (when rel-type
-      (pcase rel-dir
-        ('outgoing
-         (setq joins " JOIN relations r ON n.id = r.source_id")
-         (push (format "r.rel_type = '%s'" rel-type) conditions)
-         (when target-type
-           (setq joins (concat joins " JOIN nodes n2 ON r.target_id = n2.id"))
-           (push (format "n2.type = '%s'" target-type) conditions)))
-        ('incoming
-         (setq joins " JOIN relations r ON n.id = r.target_id")
-         (push (format "r.rel_type = '%s'" rel-type) conditions)
-         (when target-type
-           (setq joins (concat joins " JOIN nodes n2 ON r.source_id = n2.id"))
-           (push (format "n2.type = '%s'" target-type) conditions)))))
-    (let ((full-sql (format "%s%s WHERE %s ORDER BY n.title"
-                            sql joins
-                            (string-join conditions " AND "))))
-      (mapcar #'dg--row-to-plist
-              (sqlite-select (dg--db) full-sql)))))
-
-(defun dg--display-query-results (results query-desc)
-  "Display RESULTS in query buffer with QUERY-DESC description."
-  (let ((buf (get-buffer-create dg--query-buffer-name)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "#+title: Query Results\n"))
-        (insert (format "#+property: query %s\n" query-desc))
-        (insert (format "#+property: count %d\n\n" (length results)))
-        (if (null results)
-            (insert "No results found.\n")
-          (dolist (node results)
-            (let* ((id (plist-get node :id))
-                   (type-str (plist-get node :type))
-                   (type-sym (and type-str (intern type-str)))
-                   (type-info (and type-sym (alist-get type-sym dg-node-types)))
-                   (short (or (plist-get type-info :short) "?")))
-              (insert (format "** %s :%s:\n[[dg:%s]]\n" (plist-get node :title) short id)))))
-        (goto-char (point-min))
-        (org-mode)
         (read-only-mode 1)))
     (pop-to-buffer buf)))
 
@@ -1457,6 +1580,41 @@ Find all nodes of a type, optionally filtered by relations."
 ;;; Relation Management
 ;;; ============================================================
 
+(defun dg-link (rel-type &optional with-note)
+  "Add relation from current node.
+If cursor is on a link, use that as target; otherwise prompt.
+REL-TYPE is the relation type symbol.
+With prefix argument (WITH-NOTE), also prompt for context note."
+  (interactive
+   (list (intern (completing-read
+                  "Relation: "
+                  (mapcar #'car dg-relation-types)
+                  nil t))
+         current-prefix-arg))
+  (let ((source-id (dg--get-id-at-point)))
+    (unless source-id
+      (user-error "Not on a discourse node"))
+    (let* ((link-target (dg--link-id-at-point))
+           (target-id (or link-target
+                          (dg--completing-read-node "Target: "))))
+      (when target-id
+        (let* ((prop (concat "DG_" (upcase (symbol-name rel-type))))
+               (note-prop (concat prop "_NOTE"))
+               (existing (org-entry-get nil prop))
+               (note (when with-note
+                       (read-string "Context note (why this relation?): "))))
+          (org-set-property prop
+                            (if existing
+                                (concat existing " " target-id)
+                              target-id))
+          (when (and note (not (string-empty-p note)))
+            (org-set-property note-prop note))
+          (let ((target-node (dg-get target-id)))
+            (message "%s -> %s%s (save to update)"
+                     rel-type
+                     (or (plist-get target-node :title) target-id)
+                     (if note " [with note]" ""))))))))
+
 (defun dg-remove-relation ()
   "Remove a relation from current node.
 Shows all relations and lets user select which to remove."
@@ -1552,10 +1710,7 @@ If CENTER-ID provided, highlight that node."
      (lambda (id _)
        (let* ((node (dg-get id))
               (title (or (plist-get node :title) id))
-              (type-str (plist-get node :type))
-              (type-sym (and type-str (intern type-str)))
-              (type-info (and type-sym (alist-get type-sym dg-node-types)))
-              (color (or (and type-info (plist-get type-info :color)) "white"))
+              (color (dg--node-type-color node))
               (is-center (and center-id (string= id center-id))))
          (insert (format "  \"%s\" [label=\"%s\", fillcolor=\"%s\", style=\"%s\"];\n"
                          id
@@ -1729,16 +1884,13 @@ The SVG uses CSS variables for colors, suitable for light/dark mode."
   :group 'discourse-graph)
 
 (defun dg--make-overlay-string (id)
-  "Create overlay string for node ID."
-  (let ((supp (dg-attr-support-count id))
-        (opp (dg-attr-oppose-count id)))
-    (cond
-     ((and (> supp 0) (> opp 0))
-      (concat " " (propertize (format "[+%d -%d]" supp opp) 'face 'dg-overlay-face)))
-     ((> supp 0)
-      (concat " " (propertize (format "[+%d]" supp) 'face 'dg-overlay-face)))
-     ((> opp 0)
-      (concat " " (propertize (format "[-%d]" opp) 'face 'dg-overlay-face))))))
+  "Create overlay string for node ID using customizable attributes."
+  (let* ((node (dg-get id))
+         (node-type (and node (intern (plist-get node :type))))
+         (attrs (dg-get-all-attributes id))
+         (overlay-str (funcall dg-overlay-format-function attrs node-type)))
+    (when overlay-str
+      (concat " " (propertize overlay-str 'face 'dg-overlay-face)))))
 
 (defun dg-overlay-update ()
   "Update overlays for all discourse nodes in current buffer."
@@ -1780,184 +1932,6 @@ The SVG uses CSS variables for colors, suitable for light/dark mode."
 
 ;;; ============================================================
 ;;; Smart Relation Commands
-;;; ============================================================
-
-(defun dg--link-id-at-point ()
-  "Get the target ID of org link at point, if any."
-  (let ((context (org-element-context)))
-    (when (eq (org-element-type context) 'link)
-      (let ((link-type (org-element-property :type context))
-            (path (org-element-property :path context)))
-        (cond
-         ((string= link-type "id") path)
-         ((string= link-type "dg") path)
-         ((string= link-type "denote")
-          (when (string-match "^\\([0-9T]+\\)" path)
-            (match-string 1 path)))
-         (t nil))))))
-
-(defun dg-link (rel-type &optional with-note)
-  "Add relation from current node.
-If cursor is on a link, use that as target; otherwise prompt.
-REL-TYPE is the relation type symbol.
-With prefix argument (WITH-NOTE), also prompt for context note."
-  (interactive
-   (list (intern (completing-read
-                  "Relation: "
-                  (mapcar #'car dg-relation-types)
-                  nil t))
-         current-prefix-arg))
-  (let ((source-id (dg--get-id-at-point)))
-    (unless source-id
-      (user-error "Not on a discourse node"))
-    (let* ((link-target (dg--link-id-at-point))
-           (target-id (or link-target
-                          (dg--completing-read-node "Target: "))))
-      (when target-id
-        (let* ((prop (concat "DG_" (upcase (symbol-name rel-type))))
-               (note-prop (concat prop "_NOTE"))
-               (existing (org-entry-get nil prop))
-               (note (when with-note
-                       (read-string "Context note (why this relation?): "))))
-          (org-set-property prop
-                            (if existing
-                                (concat existing " " target-id)
-                              target-id))
-          (when (and note (not (string-empty-p note)))
-            (org-set-property note-prop note))
-          (let ((target-node (dg-get target-id)))
-            (message "%s -> %s%s (save to update)"
-                     rel-type
-                     (or (plist-get target-node :title) target-id)
-                     (if note " [with note]" ""))))))))
-
-;;; ============================================================
-;;; Save/Load Queries
-;;; ============================================================
-
-(defvar dg--saved-queries nil
-  "Alist of saved queries. Each entry: (NAME . QUERY-PLIST).")
-
-(defun dg-save-query (name query)
-  "Save QUERY with NAME to saved queries."
-  (setf (alist-get name dg--saved-queries nil nil #'equal) query)
-  (dg--persist-queries))
-
-(defun dg--persist-queries ()
-  "Save queries to file."
-  (with-temp-file dg-queries-file
-    (insert ";;; Discourse Graph Saved Queries -*- lexical-binding: t -*-\n")
-    (insert ";; Auto-generated, do not edit manually\n\n")
-    (prin1 `(setq dg--saved-queries ',dg--saved-queries) (current-buffer))
-    (insert "\n")))
-
-(defun dg--load-queries ()
-  "Load queries from file."
-  (when (file-exists-p dg-queries-file)
-    (load dg-queries-file t t)))
-
-(defun dg-query-save ()
-  "Save current query interactively."
-  (interactive)
-  (let* ((name (read-string "Query name: "))
-         (node-type (intern (completing-read
-                             "Node type (or 'all'): "
-                             (cons "all" (mapcar #'car dg-node-types)))))
-         (rel-filter (y-or-n-p "Add relation filter? "))
-         (query (list :node-type node-type)))
-    (when rel-filter
-      (let* ((direction (intern (completing-read "Direction: " '("outgoing" "incoming"))))
-             (rel-type (intern (completing-read "Relation type: "
-                                                (mapcar #'car dg-relation-types))))
-             (target-type (intern (completing-read
-                                   "Target type (or 'any'): "
-                                   (cons "any" (mapcar #'car dg-node-types))))))
-        (setq query (plist-put query :rel-direction direction))
-        (setq query (plist-put query :rel-type rel-type))
-        (setq query (plist-put query :target-type target-type))))
-    (dg-save-query name query)
-    (message "Saved query: %s" name)))
-
-(defun dg-query-load ()
-  "Load and run a saved query."
-  (interactive)
-  (dg--load-queries)
-  (if (not dg--saved-queries)
-      (message "No saved queries")
-    (let* ((name (completing-read "Load query: "
-                                  (mapcar #'car dg--saved-queries)
-                                  nil t))
-           (query (alist-get name dg--saved-queries nil nil #'equal)))
-      (dg--run-saved-query name query))))
-
-(defun dg--run-saved-query (name query)
-  "Run saved QUERY with NAME and display results."
-  (let* ((node-type (plist-get query :node-type))
-         (rel-direction (plist-get query :rel-direction))
-         (rel-type (plist-get query :rel-type))
-         (target-type (plist-get query :target-type))
-         (nodes (if (eq node-type 'all)
-                    (dg-get-all)
-                  (dg-find-by-type (symbol-name node-type))))
-         (results nodes))
-    ;; Apply relation filter if present
-    (when rel-direction
-      (setq results
-            (seq-filter
-             (lambda (node)
-               (let* ((id (plist-get node :id))
-                      (rels (if (eq rel-direction 'outgoing)
-                                (dg-find-outgoing id)
-                              (dg-find-incoming id)))
-                      (filtered (seq-filter
-                                 (lambda (r)
-                                   (and (string= (nth 1 r) (symbol-name rel-type))
-                                        (or (eq target-type 'any)
-                                            (let ((target (dg-get (nth 2 r))))
-                                              (and target
-                                                   (string= (plist-get target :type)
-                                                            (symbol-name target-type)))))))
-                                 rels)))
-                 (> (length filtered) 0)))
-             results)))
-    ;; Display results
-    (dg--display-saved-query-results name results)))
-
-(defun dg--display-saved-query-results (name results)
-  "Display saved query RESULTS with NAME in a buffer."
-  (let ((buf (get-buffer-create "*DG Query Results*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (org-mode)
-        (insert (format "#+title: Query: %s\n" name))
-        (insert (format "#+property: results %d\n\n" (length results)))
-        (if (null results)
-            (insert "No results found.\n")
-          (dolist (node results)
-            (let* ((id (plist-get node :id))
-                   (title (plist-get node :title))
-                   (type-str (plist-get node :type))
-                   (type-sym (and type-str (intern type-str)))
-                   (type-info (and type-sym (alist-get type-sym dg-node-types)))
-                   (type-short (or (plist-get type-info :short) "?")))
-              (insert (format "** %s :%s:\n[[dg:%s]]\n" title type-short id)))))
-        (goto-char (point-min))
-        (read-only-mode 1)))
-    (pop-to-buffer buf)))
-
-(defun dg-query-delete ()
-  "Delete a saved query."
-  (interactive)
-  (dg--load-queries)
-  (if (not dg--saved-queries)
-      (message "No saved queries")
-    (let ((name (completing-read "Delete query: "
-                                 (mapcar #'car dg--saved-queries)
-                                 nil t)))
-      (setq dg--saved-queries (assoc-delete-all name dg--saved-queries))
-      (dg--persist-queries)
-      (message "Deleted query: %s" name))))
 
 ;;; ============================================================
 ;;; Graph Preview
@@ -2027,7 +2001,7 @@ DEPTH controls how many levels of relations to include (default 2)."
   "Validate discourse graph for consistency issues."
   (interactive)
   (let ((issues nil)
-        (nodes (dg-get-all))
+        (nodes (dg-all-nodes))
         (node-ids (make-hash-table :test 'equal)))
     ;; Build ID set
     (dolist (node nodes)
@@ -2070,56 +2044,23 @@ DEPTH controls how many levels of relations to include (default 2)."
           (pop-to-buffer buf))
       (message "Discourse Graph validation passed: no issues found"))))
 
-(defun dg-cleanup-dangling ()
-  "Remove relations with dangling references."
-  (interactive)
-  (when (yes-or-no-p "Remove all relations pointing to non-existent nodes? ")
-    (let ((node-ids (make-hash-table :test 'equal))
-          (removed 0))
-      ;; Build ID set
-      (dolist (node (dg-get-all))
-        (puthash (plist-get node :id) t node-ids))
-      ;; Find and remove dangling
-      (let ((rows (sqlite-select (dg--db)
-                                 "SELECT rowid, source_id, target_id FROM relations")))
-        (dolist (row rows)
-          (let ((rowid (nth 0 row))
-                (source (nth 1 row))
-                (target (nth 2 row)))
-            (unless (and (gethash source node-ids)
-                         (gethash target node-ids))
-              (sqlite-execute (dg--db)
-                              "DELETE FROM relations WHERE rowid = ?"
-                              (list rowid))
-              (cl-incf removed)))))
-      (message "Removed %d dangling relations" removed))))
+;;; ============================================================
+;;; Attribute Commands
+;;; ============================================================
 
-(defun dg-find-orphan-nodes ()
-  "Find nodes with no relations (neither incoming nor outgoing)."
+(defun dg-use-detailed-overlay ()
+  "Switch to detailed overlay format."
   (interactive)
-  (let ((orphans (sqlite-select
-                  (dg--db)
-                  "SELECT id, type, title FROM nodes
-                   WHERE id NOT IN (SELECT source_id FROM relations)
-                   AND id NOT IN (SELECT target_id FROM relations)")))
-    (if orphans
-        (with-current-buffer (get-buffer-create "*DG Orphan Nodes*")
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert (format "Orphan Nodes (%d)\n" (length orphans)))
-            (insert (make-string 40 ?═) "\n\n")
-            (dolist (node orphans)
-              (let* ((id (nth 0 node))
-                     (ntype (nth 1 node))
-                     (title (nth 2 node)))
-                (insert-text-button
-                 (format "[%s] %s\n" (upcase (substring ntype 0 3)) title)
-                 'action (lambda (_) (dg-goto-node-by-id id))
-                 'face 'link)))
-            (goto-char (point-min)))
-          (special-mode)
-          (pop-to-buffer (current-buffer)))
-      (message "No orphan nodes found"))))
+  (setq dg-overlay-format-function #'dg-detailed-overlay-format)
+  (when dg-overlay-enable (dg-overlay-update))
+  (message "Using detailed overlay format"))
+
+(defun dg-use-simple-overlay ()
+  "Switch to simple overlay format."
+  (interactive)
+  (setq dg-overlay-format-function #'dg-default-overlay-format)
+  (when dg-overlay-enable (dg-overlay-update))
+  (message "Using simple overlay format"))
 
 ;;; ============================================================
 ;;; Transient Menus
@@ -2143,23 +2084,20 @@ DEPTH controls how many levels of relations to include (default 2)."
     ("x" "Toggle context" dg-context-toggle)
     ("b" "Go back" dg-context-go-back)
     ("p" "Graph preview" dg-graph-preview)]]
-  [["View"
-    ("i" "Node index" dg-node-index)
-    ("t" "Statistics" dg-stats)
-    ("o" "Toggle overlays" dg-overlay-toggle)]
-   ["Query"
-    ("?" "Query this node" dg-query-relations)
-    ("/" "Query builder" dg-query-builder)
-    ("L" "Load query" dg-query-load)]
+  [["Analysis"
+    ("S" "Synthesis" dg-synthesis-open)
+    ("A" "Analyze question" dg-analyze-question)
+    ("?" "Query this node" dg-query-relations)]
    ["Export"
     ("E s" "SVG" dg-export-svg)
     ("E m" "Markdown" dg-export-markdown)]]
   [["Maintain"
     ("!" "Rebuild cache" dg-rebuild-cache)
-    ("v" "Validate" dg-validate)
-    ("X" "Cleanup dangling" dg-cleanup-dangling)
-    ("O" "Find orphans" dg-find-orphan-nodes)]
-   ["Config"
+    ("v" "Validate" dg-validate)]
+   ["Display"
+    ("o" "Toggle overlays" dg-overlay-toggle)
+    ("d" "Detailed overlay" dg-use-detailed-overlay)
+    ("D" "Simple overlay" dg-use-simple-overlay)
     ("W" "Configure..." dg-configure)]])
 
 (transient-define-prefix dg-configure ()
@@ -2326,8 +2264,12 @@ All other commands available via \\[dg-menu]."
         (add-hook 'org-mode-hook #'dg--org-mode-setup)
         ;; Initialize database
         (dg--db)
-        ;; Load saved queries
-        (dg--load-queries)
+        ;; Update overlays in all existing org buffers
+        (when dg-overlay-enable
+          (dolist (buf (buffer-list))
+            (with-current-buffer buf
+              (when (derived-mode-p 'org-mode)
+                (dg-overlay-update)))))
         (message "Discourse Graph mode enabled. Press C-c d d for menu."))
     (remove-hook 'after-save-hook #'dg--after-save-hook)
     (remove-hook 'post-command-hook #'dg--post-command-hook)
@@ -2351,6 +2293,378 @@ All other commands available via \\[dg-menu]."
   (when discourse-graph-mode
     ;; Update overlays after a short delay
     (run-with-idle-timer 1 nil #'dg-overlay-update)))
+
+
+;;; ============================================================
+;;; Configuration
+;;; ============================================================
+
+(defcustom dg-synthesis-file nil
+  "Path to the synthesis file. If nil, uses dg-directories."
+  :type '(choice (const nil) file)
+  :group 'discourse-graph)
+
+;;; ============================================================
+;;; Core Analysis Functions
+;;; ============================================================
+
+(defun dg--get-argument-gaps (claim-id)
+  "Check structural completeness of argument for CLAIM-ID.
+Returns list of gap types."
+  (let ((gaps nil)
+        (supporting (dg-find-supporting-evidence claim-id))
+        (opposing (dg-find-opposing-evidence claim-id)))
+    ;; Gap 1: No supporting evidence at all
+    (when (= (length supporting) 0)
+      (push 'no-support gaps))
+    ;; Gap 2: Supporting evidence lacks sources
+    (when (and (> (length supporting) 0)
+               (seq-every-p (lambda (ev)
+                              (= (length (dg-find-outgoing (plist-get ev :id) 'informs)) 0))
+                            supporting))
+      (push 'no-source gaps))
+    ;; Gap 3: Has opposition but no/insufficient response
+    (when (and (> (length opposing) 0)
+               (<= (length supporting) (length opposing)))
+      (push 'unanswered-opposition gaps))
+    gaps))
+
+(defun dg--analyze-question-answers (question-id)
+  "Analyze all answers to QUESTION-ID with structural assessment."
+  (let ((answers (dg-find-answers question-id)))
+    (mapcar
+     (lambda (answer)
+       (let* ((id (plist-get answer :id))
+              (title (plist-get answer :title))
+              (supporting (dg-find-supporting-evidence id))
+              (opposing (dg-find-opposing-evidence id))
+              (gaps (dg--get-argument-gaps id))
+              ;; Structural strength assessment
+              (strength (cond
+                         ((member 'no-support gaps) 'unsupported)
+                         ((member 'unanswered-opposition gaps) 'challenged)
+                         ((> (length opposing) 0) 'contested)
+                         ((> (length supporting) 0) 'supported)
+                         (t 'unknown))))
+         (list :id id
+               :title title
+               :support-count (length supporting)
+               :oppose-count (length opposing)
+               :gaps gaps
+               :strength strength
+               :supporting supporting
+               :opposing opposing)))
+     answers)))
+
+;;; ============================================================
+;;; dg-synthesis: Question Analysis Block
+;;; ============================================================
+
+(defun org-dblock-write:dg-synthesis (params)
+  "Analyze a question: compare answers by argument structure."
+  (let* ((q-ref (or (plist-get params :id) (plist-get params :question)))
+         (question-id (dg--resolve-node-ref q-ref))
+         (question (and question-id (dg-get question-id))))
+    (if (not question)
+        (insert (format "/Question not found: %s/\n" q-ref))
+      (let* ((analyses (dg--analyze-question-answers question-id))
+             ;; Sort by structural strength
+             (sorted (seq-sort-by
+                      (lambda (a)
+                        (pcase (plist-get a :strength)
+                          ('supported 0)
+                          ('contested 1)
+                          ('challenged 2)
+                          ('unsupported 3)
+                          (_ 4)))
+                      #'< analyses)))
+        (insert (format "/Updated: %s/\n\n" (format-time-string "%Y-%m-%d %H:%M")))
+        (if (null sorted)
+            (insert "/No answers to this question yet./\n")
+          ;; Answer ranking table
+          (insert "** Answer Structure\n\n")
+          (insert "| Answer | Status | +Ev | -Ev | Gaps |\n")
+          (insert "|---+---+---+---+---|\n")
+          (dolist (a sorted)
+            (let* ((id (plist-get a :id))
+                   (title (plist-get a :title))
+                   (strength (plist-get a :strength))
+                   (status (pcase strength
+                             ('supported "✓ Supported")
+                             ('contested "⚡ Contested")
+                             ('challenged "⚠ Challenged")
+                             ('unsupported "✗ Unsupported")
+                             (_ "?")))
+                   (gaps (plist-get a :gaps))
+                   (gap-str (if gaps
+                                (mapconcat #'symbol-name gaps ", ")
+                              "—")))
+              (insert (format "| [[dg:%s][%s]] | %s | %d | %d | %s |\n"
+                              id
+                              (truncate-string-to-width title 28 nil nil "…")
+                              status
+                              (plist-get a :support-count)
+                              (plist-get a :oppose-count)
+                              gap-str))))
+          ;; Align table
+          (save-excursion
+            (forward-line -1)
+            (when (org-at-table-p)
+              (org-table-align)))
+          ;; Evidence details
+          (insert "\n** Evidence Details\n")
+          (dolist (a sorted)
+            (let* ((id (plist-get a :id))
+                   (title (plist-get a :title))
+                   (strength (plist-get a :strength))
+                   (supporting (plist-get a :supporting))
+                   (opposing (plist-get a :opposing)))
+              (insert (format "\n*** %s\n" (truncate-string-to-width title 50 nil nil "…")))
+              (insert (format "Status: *%s*\n\n" strength))
+              ;; Supporting evidence with sources
+              (if supporting
+                  (progn
+                    (insert "**** Supporting\n")
+                    (dolist (ev supporting)
+                      (let* ((ev-id (plist-get ev :id))
+                             (ev-title (plist-get ev :title))
+                             (sources (dg-find-outgoing ev-id 'informs))
+                             (src-names (mapcar (lambda (s) (plist-get s :title)) sources)))
+                        (insert (format "- [[dg:%s][%s]]\n"
+                                        ev-id
+                                        (truncate-string-to-width ev-title 50 nil nil "…")))
+                        (if sources
+                            (insert (format "  Sources: %s\n"
+                                            (truncate-string-to-width
+                                             (string-join src-names ", ") 50 nil nil "…")))
+                          (insert "  ⚠ /no source cited/\n")))))
+                (insert "**** Supporting\n/None/\n"))
+              ;; Opposing evidence
+              (if opposing
+                  (progn
+                    (insert "**** Opposing\n")
+                    (dolist (ev opposing)
+                      (let* ((ev-id (plist-get ev :id))
+                             (ev-title (plist-get ev :title))
+                             (sources (dg-find-outgoing ev-id 'informs)))
+                        (insert (format "- [[dg:%s][%s]] (%d sources)\n"
+                                        ev-id
+                                        (truncate-string-to-width ev-title 50 nil nil "…")
+                                        (length sources))))))
+                (insert "**** Opposing\n/None/\n"))
+              ;; Gaps warning
+              (when (plist-get a :gaps)
+                (insert (format "\n⚠ *Structural gaps:* %s\n"
+                                (mapconcat #'symbol-name (plist-get a :gaps) ", ")))))))))))
+
+;;; ============================================================
+;;; dg-unanswered-opposition: Find unresponded objections
+;;; ============================================================
+
+(defun org-dblock-write:dg-unanswered-opposition (params)
+  "Find claims with objections that were never adequately responded to."
+  (let* ((limit (or (plist-get params :limit) 20))
+         (claims (dg-find-by-type 'claim))
+         (with-unanswered
+          (seq-filter
+           (lambda (c)
+             (let* ((id (plist-get c :id))
+                    (opposing (dg-find-opposing-evidence id))
+                    (supporting (dg-find-supporting-evidence id)))
+               (and (> (length opposing) 0)
+                    (<= (length supporting) (length opposing)))))
+           claims))
+         ;; Sort by severity
+         (sorted (seq-sort-by
+                  (lambda (c)
+                    (let* ((id (plist-get c :id))
+                           (opp (length (dg-find-opposing-evidence id)))
+                           (supp (length (dg-find-supporting-evidence id))))
+                      (- opp supp)))
+                  #'> with-unanswered))
+         (limited (seq-take sorted limit)))
+    (insert (format "/Updated: %s/\n\n" (format-time-string "%Y-%m-%d %H:%M")))
+    (if (null limited)
+        (insert "/All objections have been responded to./\n")
+      (insert "| Claim | Objections | Responses | Deficit |\n")
+      (insert "|---+---+---+---|\n")
+      (dolist (c limited)
+        (let* ((id (plist-get c :id))
+               (title (plist-get c :title))
+               (opp-count (length (dg-find-opposing-evidence id)))
+               (supp-count (length (dg-find-supporting-evidence id))))
+          (insert (format "| [[dg:%s][%s]] | %d | %d | %d |\n"
+                          id
+                          (truncate-string-to-width title 35 nil nil "…")
+                          opp-count supp-count
+                          (- opp-count supp-count)))))
+      ;; Align table
+      (save-excursion
+        (forward-line -1)
+        (when (org-at-table-p)
+          (org-table-align))))))
+
+;;; ============================================================
+;;; dg-argument-gaps: Structural completeness lint
+;;; ============================================================
+
+(defun org-dblock-write:dg-argument-gaps (params)
+  "Check argument chains for structural completeness."
+  (let* ((limit (or (plist-get params :limit) 30))
+         (claims (dg-find-by-type 'claim))
+         (with-gaps
+          (seq-filter
+           (lambda (c)
+             (> (length (dg--get-argument-gaps (plist-get c :id))) 0))
+           claims))
+         (sorted (seq-sort-by
+                  (lambda (c)
+                    (length (dg--get-argument-gaps (plist-get c :id))))
+                  #'> with-gaps))
+         (limited (seq-take sorted limit)))
+    (insert (format "/Updated: %s/\n\n" (format-time-string "%Y-%m-%d %H:%M")))
+    (if (null limited)
+        (insert "/All claims have complete argument structure./\n")
+      (insert "| Claim | Structural Gaps |\n")
+      (insert "|---+---|\n")
+      (dolist (c limited)
+        (let* ((id (plist-get c :id))
+               (title (plist-get c :title))
+               (gaps (dg--get-argument-gaps id)))
+          (insert (format "| [[dg:%s][%s]] | %s |\n"
+                          id
+                          (truncate-string-to-width title 40 nil nil "…")
+                          (mapconcat #'symbol-name gaps ", ")))))
+      ;; Align table
+      (save-excursion
+        (forward-line -1)
+        (when (org-at-table-p)
+          (org-table-align))))))
+
+;;; ============================================================
+;;; dg-overview: Research health overview
+;;; ============================================================
+
+(defun org-dblock-write:dg-overview (_params)
+  "Overview focusing on argumentation health."
+  (let* ((questions (dg-find-by-type 'question))
+         (claims (dg-find-by-type 'claim))
+         (evidence (dg-find-by-type 'evidence))
+         (sources (dg-find-by-type 'source))
+         ;; Structural analysis
+         (claims-with-gaps (length (seq-filter
+                                    (lambda (c)
+                                      (> (length (dg--get-argument-gaps (plist-get c :id))) 0))
+                                    claims)))
+         (claims-unanswered (length (seq-filter
+                                     (lambda (c)
+                                       (member 'unanswered-opposition
+                                               (dg--get-argument-gaps (plist-get c :id))))
+                                     claims)))
+         (questions-open (length (seq-filter
+                                  (lambda (q)
+                                    (= (length (dg-find-answers (plist-get q :id))) 0))
+                                  questions))))
+    (insert (format "/Updated: %s/\n\n" (format-time-string "%Y-%m-%d %H:%M")))
+    (insert "| Category | Total | Issues |\n")
+    (insert "|---+---+---|\n")
+    (insert (format "| Questions | %d | %d open |\n"
+                    (length questions) questions-open))
+    (insert (format "| Claims | %d | %d with gaps |\n"
+                    (length claims) claims-with-gaps))
+    (insert (format "| └ Unanswered objections | — | %d |\n" claims-unanswered))
+    (insert (format "| Evidence | %d | |\n" (length evidence)))
+    (insert (format "| Sources | %d | |\n" (length sources)))
+    ;; Align table
+    (save-excursion
+      (forward-line -1)
+      (when (org-at-table-p)
+        (org-table-align)))))
+
+;;; ============================================================
+;;; Synthesis Dashboard
+;;; ============================================================
+
+(defun dg--synthesis-file-path ()
+  "Get synthesis file path."
+  (or dg-synthesis-file
+      (expand-file-name "dg-synthesis.org" (car dg-directories))))
+
+(defun dg-synthesis-open ()
+  "Open the synthesis dashboard."
+  (interactive)
+  (let ((path (dg--synthesis-file-path)))
+    (if (file-exists-p path)
+        (progn
+          (find-file path)
+          (when (y-or-n-p "Update? ")
+            (org-update-all-dblocks)
+            (save-buffer)))
+      (dg--synthesis-create path)
+      (find-file path)
+      (org-update-all-dblocks)
+      (save-buffer))))
+
+(defun dg--synthesis-create (path)
+  "Create new synthesis dashboard at PATH."
+  (let ((dir (file-name-directory path)))
+    (unless (file-exists-p dir)
+      (make-directory dir t)))
+  (with-temp-file path
+    (insert "#+TITLE: Argumentation Analysis\n")
+    (insert "#+STARTUP: showall\n\n")
+    (insert "* Overview\n")
+    (insert "#+BEGIN: dg-overview\n#+END:\n\n")
+    (insert "* Unanswered Objections\n")
+    (insert "/Claims where objections have not been adequately addressed/\n\n")
+    (insert "#+BEGIN: dg-unanswered-opposition\n#+END:\n\n")
+    (insert "* Structural Gaps\n")
+    (insert "/Claims with incomplete argument chains/\n\n")
+    (insert "#+BEGIN: dg-argument-gaps\n#+END:\n\n")))
+
+;;; ============================================================
+;;; Interactive Commands
+;;; ============================================================
+
+(defun dg-analyze-question (question-ref)
+  "Create/open synthesis analysis for a question."
+  (interactive
+   (list (let ((id (dg--get-id-at-point)))
+           (if (and id (string= (plist-get (dg-get id) :type) "question"))
+               id
+             (read-string "Question (ID or title): ")))))
+  (let* ((question-id (dg--resolve-node-ref question-ref))
+         (question (and question-id (dg-get question-id))))
+    (unless question
+      (user-error "Question not found: %s" question-ref))
+    (let* ((title (plist-get question :title))
+           (safe-name (replace-regexp-in-string "[^a-zA-Z0-9]+" "-" title))
+           (file-name (format "dg-q-%s.org"
+                              (substring safe-name 0 (min 20 (length safe-name)))))
+           (file-path (expand-file-name file-name (car dg-directories))))
+      (if (file-exists-p file-path)
+          (progn
+            (find-file file-path)
+            (org-update-all-dblocks)
+            (save-buffer))
+        (with-temp-file file-path
+          (insert (format "#+TITLE: Q: %s\n\n" title))
+          (insert (format "#+BEGIN: dg-synthesis :id \"%s\"\n" question-id))
+          (insert "#+END:\n"))
+        (find-file file-path)
+        (org-update-all-dblocks)
+        (save-buffer)))))
+
+;;; ============================================================
+;;; Helper Functions
+;;; ============================================================
+
+(defun dg--resolve-node-ref (ref)
+  "Resolve REF to a node ID."
+  (cond
+   ((null ref) nil)
+   ((dg-get ref) ref)
+   (t (plist-get (car (dg-find-by-title ref)) :id))))
 
 (provide 'discourse-graph)
 ;;; discourse-graph.el ends here
