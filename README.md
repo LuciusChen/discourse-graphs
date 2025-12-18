@@ -2,7 +2,9 @@
 
 An Emacs org-mode implementation of the [Discourse Graph](https://discoursegraphs.com/) protocol for knowledge synthesis.
 
-![Discourse Graph](/assets/screenshot.jpg "Discourse Graph")
+![Discourse Graph](./assets/screenshot.jpg "Discourse Graph")
+
+More screenshots available in the [assets folder](./assets)
 
 ## What is a Discourse Graph?
 
