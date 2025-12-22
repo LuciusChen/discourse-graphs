@@ -1,9 +1,9 @@
 # discourse-graphs.el
 
-An Emacs org-mode implementation of the [Discourse Graph](https://discoursegraphs.com/) protocol for knowledge synthesis, with **interactive web visualization**.
+An Emacs org-mode implementation of the [Discourse Graphs](https://discoursegraphs.com/) protocol for knowledge synthesis, with **interactive web visualization**.
 
-![Discourse Graph](./assets/screenshot.jpg "Discourse Graph")
-![Discourse Graph UI](./assets/screenshot5.jpg "Discourse Graph UI")
+![Discourse Graphs](./assets/screenshot.jpg "Discourse Graphs")
+![Discourse Graphs UI](./assets/screenshot5.jpg "Discourse Graphs UI")
 
 More screenshots available in the [assets folder](./assets)
 
