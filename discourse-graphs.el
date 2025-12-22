@@ -82,7 +82,7 @@
   :group 'discourse-graphs)
 
 (defcustom dg-db-file
-  (expand-file-name "discourse-graph.db" user-emacs-directory)
+  (expand-file-name "discourse-graphs.db" user-emacs-directory)
   "Path to SQLite database file."
   :type 'file
   :group 'discourse-graphs)

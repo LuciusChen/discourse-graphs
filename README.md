@@ -351,7 +351,7 @@ The system detects these argument weaknesses:
 (setq dg-recursive t)
 
 ;; Database location
-(setq dg-db-file "~/.emacs.d/discourse-graph.db")
+(setq dg-db-file "~/.emacs.d/discourse-graphs.db")
 
 ;; Context panel width
 (setq dg-context-window-width 0.3)
