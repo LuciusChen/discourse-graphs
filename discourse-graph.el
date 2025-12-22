@@ -1,4 +1,4 @@
-;;; discourse-graph.el --- Discourse Graph for org-mode with SQLite -*- lexical-binding: t; -*-
+;;; discourse-graphs.el --- Discourse Graph for org-mode with SQLite -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024-2025
 ;; Author:
@@ -30,9 +30,9 @@
 ;; - Export to Graphviz SVG and Markdown
 ;;
 ;; Quick Start:
-;;   (require 'discourse-graph)
+;;   (require 'discourse-graphs)
 ;;   (setq dg-directories '("~/org/research/"))
-;;   (discourse-graph-mode 1)
+;;   (discourse-graphs-mode 1)
 ;;   M-x dg-menu  or  C-c d d
 ;;
 ;; Node Types:
@@ -56,13 +56,13 @@
 (require 'transient)
 
 (defconst dg-version "1.0.0"
-  "Version of discourse-graph.")
+  "Version of discourse-graphs.")
 
 ;;; ============================================================
 ;;; Custom Group
 ;;; ============================================================
 
-(defgroup discourse-graph nil
+(defgroup discourse-graphs nil
   "Discourse Graph for org-mode knowledge synthesis."
   :group 'org
   :prefix "dg-")
@@ -74,35 +74,35 @@
 (defcustom dg-directories (list org-directory)
   "List of directories to scan for discourse graph nodes."
   :type '(repeat directory)
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-recursive t
   "Whether to recursively scan subdirectories."
   :type 'boolean
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-db-file
   (expand-file-name "discourse-graph.db" user-emacs-directory)
   "Path to SQLite database file."
   :type 'file
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-id-length 8
   "Length of generated hash IDs (when not using denote)."
   :type 'integer
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-use-denote nil
   "Whether to use denote for file creation and linking.
 When non-nil, uses denote's ID format and linking conventions."
   :type 'boolean
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-denote-keywords-as-type t
   "When using denote, add node type as a keyword in filename.
 E.g., 20231215T120000--my-claim__claim.org"
   :type 'boolean
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-node-types
   '((question . (:short "QUE" :color "lightblue"   :desc "Research question"))
@@ -114,7 +114,7 @@ Each entry is (TYPE . (:short ABBREV :color COLOR :desc DESCRIPTION))."
   :type '(alist :key-type symbol
                 :value-type (plist :key-type keyword
                                    :value-type string))
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-relation-types
   '((supports  . (:inverse "Supported By" :color "green"  :style "solid"))
@@ -127,17 +127,40 @@ INVERSE-NAME is the human-readable name when viewing from the target's perspecti
   :type '(alist :key-type symbol
                 :value-type (plist :key-type keyword
                                    :value-type string))
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
+
+(defcustom dg-relation-patterns
+  '((supports . (:source (evidence) :target (claim)))
+    (opposes  . (:source (evidence) :target (claim)))
+    (informs  . (:source (source) :target (evidence)))
+    (answers  . (:source (claim) :target (question))))
+  "Canonical source/target type patterns for each relation type.
+Each entry is (RELATION . (:source SOURCE-TYPES :target TARGET-TYPES)).
+These represent expected argumentative patterns:
+  - Evidence supports/opposes Claims
+  - Sources inform Evidence
+  - Claims answer Questions
+Relations violating these patterns are allowed but flagged as anomalies."
+  :type '(alist :key-type symbol
+                :value-type (plist :key-type keyword
+                                   :value-type (repeat symbol)))
+  :group 'discourse-graphs)
+
+(defcustom dg-warn-relation-anomalies t
+  "If non-nil, warn when creating relations that violate canonical patterns.
+Anomalous relations are always allowed but will be surfaced in analysis."
+  :type 'boolean
+  :group 'discourse-graphs)
 
 (defcustom dg-context-auto-update t
   "Automatically update context buffer when cursor moves to new node."
   :type 'boolean
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-context-window-width 0.3
   "Width of context window as fraction of frame width (0.0-1.0)."
   :type 'float
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-title-templates
   '((question . "QUE: %s")
@@ -148,24 +171,59 @@ INVERSE-NAME is the human-readable name when viewing from the target's perspecti
 Use %s as placeholder for the actual title.
 Set to nil to disable auto-formatting."
   :type '(alist :key-type symbol :value-type string)
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-auto-format-title nil
   "Whether to automatically format titles using templates."
   :type 'boolean
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-overlay-enable t
   "If non-nil, show relation count overlay after node headings."
   :type 'boolean
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 
 (defcustom dg-export-link-style 'wikilink
   "Link style for markdown export.
 `wikilink' for [[Title]] style, `markdown' for [Title](file.md) style."
   :type '(choice (const wikilink) (const markdown))
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
+
+;;; ============================================================
+;;; Extract Content to Heading Configuration
+;;; ============================================================
+
+(defcustom dg-extract-target "dg-extracts.org"
+  "Target file for extracted headings.
+Can be:
+  - A string: file path (absolute or relative to first dg-directory)
+  - A function: called with source file path, returns target file path
+
+Examples:
+
+  ;; Fixed file (default)
+  (setq dg-extract-target \"dg-extracts.org\")
+
+  ;; Absolute path
+  (setq dg-extract-target \"~/org/my-extracts.org\")
+
+  ;; Companion file: notes.org -> notes-dg.org
+  (setq dg-extract-target
+        (lambda (source)
+          (concat (file-name-sans-extension source) \"-dg.org\")))
+
+  ;; Per-directory extract file
+  (setq dg-extract-target
+        (lambda (source)
+          (expand-file-name \"extracts.org\" (file-name-directory source))))"
+  :type '(choice string function)
+  :group 'discourse-graphs)
+
+(defcustom dg-extract-include-source-link t
+  "If non-nil, include a link back to the source in extracted headings."
+  :type 'boolean
+  :group 'discourse-graphs)
 
 ;;; ============================================================
 ;;; Internal Variables
@@ -234,6 +292,14 @@ Creates the database file and schema if they don't exist."
       context_id  TEXT,
       context_note TEXT,
       UNIQUE(source_id, target_id, rel_type)
+    )")
+  ;; Node files tracking table for smart scan
+  (sqlite-execute (dg--db) "
+    CREATE TABLE IF NOT EXISTS node_files (
+      file         TEXT PRIMARY KEY,
+      mtime        REAL NOT NULL,
+      node_count   INTEGER DEFAULT 0,
+      last_scan    REAL NOT NULL
     )")
   ;; Migration: add context_note column if missing (for old databases)
   (dg--migrate-schema)
@@ -399,8 +465,13 @@ Returns (NODES . RELATIONS) where each is a list."
             (save-excursion
               (save-restriction
                 (widen)
-                ;; Check for file-level node (denote style)
+                ;; Check for file-level node (denote style or #+ID style)
                 (let* ((denote-id (dg--extract-denote-id file))
+                       (keyword-id (progn
+                                     (goto-char (point-min))
+                                     (when (re-search-forward "^#\\+ID:[ \t]*\\(.+\\)" nil t)
+                                       (string-trim (match-string 1)))))
+                       (file-id (or denote-id keyword-id))
                        (file-type (progn
                                     (goto-char (point-min))
                                     (when (re-search-forward "^#\\+dg_type:[ \t]*\\(.+\\)" nil t)
@@ -409,8 +480,8 @@ Returns (NODES . RELATIONS) where each is a list."
                                      (goto-char (point-min))
                                      (when (re-search-forward "^#\\+title:[ \t]*\\(.+\\)" nil t)
                                        (string-trim (match-string 1))))))
-                  (when (and denote-id file-type file-title)
-                    (push (list :id denote-id
+                  (when (and file-id file-type file-title)
+                    (push (list :id file-id
                                 :type file-type
                                 :title file-title
                                 :file file
@@ -426,7 +497,7 @@ Returns (NODES . RELATIONS) where each is a list."
                             (targets (match-string 2)))
                         (unless (string= rel-name "type")
                           (dolist (target (split-string targets "[ \t,]+" t))
-                            (push (list :source denote-id
+                            (push (list :source file-id
                                         :target target
                                         :type (intern (replace-regexp-in-string "_" "-" rel-name)))
                                   relations)))))))
@@ -507,41 +578,8 @@ Returns (NODES . RELATIONS) where each is a list."
    (list file)))
 
 ;;; ============================================================
-;;; Cache Management
+;;; Cache Management (see also Smart Scan section)
 ;;; ============================================================
-
-(defun dg-rebuild-cache ()
-  "Completely rebuild the database from all configured directories."
-  (interactive)
-  (let ((inhibit-message t)
-        (message-log-max nil))
-    (sqlite-execute (dg--db) "DELETE FROM relations")
-    (sqlite-execute (dg--db) "DELETE FROM nodes"))
-  (let ((files (dg--collect-files))
-        (node-count 0)
-        (rel-count 0)
-        (file-count 0)
-        (total-files 0))
-    (setq total-files (length files))
-    (message "Discourse Graph: scanning %d files..." total-files)
-    (dolist (file files)
-      (cl-incf file-count)
-      ;; Show progress every 10 files
-      (when (= 0 (mod file-count 10))
-        (message "Discourse Graph: scanning... %d/%d" file-count total-files))
-      (let* ((inhibit-message t)
-             (message-log-max nil)
-             (result (dg--scan-file file))
-             (nodes (car result))
-             (relations (cdr result)))
-        (dolist (node nodes)
-          (dg--save-node node)
-          (cl-incf node-count))
-        (dolist (rel relations)
-          (dg--save-relation rel)
-          (cl-incf rel-count))))
-    (message "Discourse Graph: indexed %d nodes, %d relations from %d files"
-             node-count rel-count total-files)))
 
 (defun dg-update-file (&optional file)
   "Incrementally update index for FILE (defaults to current buffer)."
@@ -556,16 +594,21 @@ Returns (NODES . RELATIONS) where each is a list."
             (dg--delete-file-data file)
             (let* ((result (dg--scan-file file))
                    (nodes (car result))
-                   (relations (cdr result)))
+                   (relations (cdr result))
+                   (node-count (length nodes))
+                   (mtime (float-time (file-attribute-modification-time
+                                       (file-attributes file)))))
               (dolist (node nodes)
                 (dg--save-node node))
               (dolist (rel relations)
                 (dg--save-relation rel))
+              ;; Update node_files record for smart scan
+              (dg--record-node-file file node-count mtime)
               ;; Only show message if called interactively
               (when (called-interactively-p 'any)
                 (let ((inhibit-message nil))
                   (message "Discourse Graph: updated %d nodes from %s"
-                           (length nodes) (file-name-nondirectory file))))))
+                           node-count (file-name-nondirectory file))))))
         (error
          (message "DG: Error updating %s: %s" file (error-message-string err)))))))
 
@@ -774,13 +817,13 @@ Math operations: + - * / and parentheses are supported."
   :type '(alist :key-type symbol
                 :value-type (alist :key-type symbol
                                    :value-type string))
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defcustom dg-overlay-format-function #'dg-default-overlay-format
   "Function to format overlay string from attributes.
 Called with (attributes node-type) and should return a string or nil."
   :type 'function
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 (defconst dg--relation-map
   '(;; Incoming relations (from target's perspective)
     ("Supported By" . (:rel "supports" :dir incoming))
@@ -1122,7 +1165,7 @@ Returns DG_SUMMARY property if exists, otherwise first paragraph."
   "Maximum number of lines to display for node content in context panel.
 Set to nil for unlimited."
   :type '(choice integer (const nil))
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defun dg--fetch-node-content (id)
   "Fetch complete content for node ID from source file.
@@ -1326,8 +1369,8 @@ REL is (direction rel_type node_id title type context_note)."
 (defun dg-context-toggle ()
   "Toggle discourse context side window."
   (interactive)
-  (unless discourse-graph-mode
-    (user-error "Discourse Graph mode is not enabled. Run M-x discourse-graph-mode first"))
+  (unless discourse-graphs-mode
+    (user-error "Discourse Graph mode is not enabled. Run M-x discourse-graphs-mode first"))
   (let ((win (get-buffer-window dg--context-buffer-name)))
     (if win
         (delete-window win)
@@ -1381,35 +1424,8 @@ Key bindings:
   (setq-local cursor-type 'box))
 
 ;;; ============================================================
-;;; Query Relations
+;;; Query Relations (Internal)
 ;;; ============================================================
-
-(defun dg-query-relations ()
-  "Query relations of current node or selected node.
-More intuitive: select a node, pick relation type, see results."
-  (interactive)
-  (let* ((current-id (dg--get-id-at-point))
-         (use-current (and current-id
-                           (y-or-n-p "Query from current node? ")))
-         (node-id (if use-current
-                      current-id
-                    (let* ((all-nodes (dg-all-nodes))
-                           (candidates (mapcar (lambda (n)
-                                                 (cons (dg--format-node-choice n)
-                                                       (plist-get n :id)))
-                                               all-nodes))
-                           (choice (completing-read "Select node: " candidates nil t)))
-                      (alist-get choice candidates nil nil #'equal))))
-         (direction (intern (completing-read
-                             "Direction: "
-                             '("both" "outgoing" "incoming"))))
-         (rel-type (let ((choice (completing-read
-                                  "Relation type: "
-                                  (cons "all" (mapcar (lambda (x) (symbol-name (car x)))
-                                                      dg-relation-types)))))
-                     (if (string= choice "all") 'all (intern choice))))
-         (results (dg--query-node-relations node-id direction rel-type)))
-    (dg--display-relation-results node-id direction rel-type results)))
 
 (defun dg--query-node-relations (id direction rel-type)
   "Query relations for node ID in DIRECTION with REL-TYPE."
@@ -1427,53 +1443,25 @@ More intuitive: select a node, pick relation type, see results."
               (dg-find-incoming id rel-type))))
     (list :outgoing outgoing :incoming incoming)))
 
-(defun dg--display-relation-results (node-id direction rel-type results)
-  "Display relation query RESULTS for NODE-ID."
-  (let ((node (dg-get node-id))
-        (outgoing (plist-get results :outgoing))
-        (incoming (plist-get results :incoming))
-        (buf (get-buffer-create "*DG Query Results*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (org-mode)
-        (insert (format "#+title: Relations of: %s\n\n" (plist-get node :title)))
-
-        (when outgoing
-          (insert (format "*  Outgoing (%d)\n" (length outgoing)))
-          (dolist (n outgoing)
-            (insert (format "** %s :%s:\n[[dg:%s]]\n"
-                            (plist-get n :title)
-                            (dg--node-type-short n)
-                            (plist-get n :id)))))
-
-        (when incoming
-          (insert (format "*  Incoming (%d)\n" (length incoming)))
-          (dolist (n incoming)
-            (insert (format "** %s :%s:\n[[dg:%s]]\n"
-                            (plist-get n :title)
-                            (dg--node-type-short n)
-                            (plist-get n :id)))))
-
-        (when (and (null outgoing) (null incoming))
-          (insert "No relations found.\n"))
-
-        (goto-char (point-min))
-        (org-content 1)
-        (read-only-mode 1)))
-    (pop-to-buffer buf)))
-
 ;;; ============================================================
 ;;; Node Navigation
 ;;; ============================================================
 
-(defun dg--completing-read-node (prompt &optional type)
-  "Interactively select a node with PROMPT, optionally filtered by TYPE."
-  (let* ((sql (if type
-                  "SELECT id, type, title FROM nodes WHERE type = ? ORDER BY title"
+(defun dg--completing-read-node (prompt &optional types)
+  "Interactively select a node with PROMPT, optionally filtered by TYPES.
+TYPES can be:
+  - nil: show all nodes
+  - a symbol: filter to that single type
+  - a list of symbols: filter to any of those types"
+  (let* ((type-list (cond ((null types) nil)
+                          ((symbolp types) (list types))
+                          ((listp types) types)))
+         (sql (if type-list
+                  (format "SELECT id, type, title FROM nodes WHERE type IN (%s) ORDER BY type, title"
+                          (mapconcat (lambda (t) (format "'%s'" (symbol-name t)))
+                                     type-list ","))
                 "SELECT id, type, title FROM nodes ORDER BY type, title"))
-         (params (when type (list (symbol-name type))))
-         (rows (sqlite-select (dg--db) sql params))
+         (rows (sqlite-select (dg--db) sql))
          (candidates (mapcar (lambda (row)
                                (let* ((type-str (nth 1 row))
                                       (ntype (intern type-str))
@@ -1483,7 +1471,7 @@ More intuitive: select a node, pick relation type, see results."
                                        (nth 0 row))))
                              rows)))
     (when candidates
-      (alist-get (completing-read prompt candidates) candidates nil nil #'equal))))
+      (alist-get (completing-read prompt candidates nil t) candidates nil nil #'equal))))
 
 (defun dg-goto-node ()
   "Jump to a discourse graph node."
@@ -1559,22 +1547,432 @@ More intuitive: select a node, pick relation type, see results."
   (interactive "sSource: ")
   (dg-create-node 'source title))
 
-(defun dg-convert-to-node (type)
-  "Convert current heading to a discourse graph node of TYPE."
+(defun dg--in-file-header-p ()
+  "Return non-nil if point is in the file header area (before first heading)."
+  (save-excursion
+    (let ((pos (point)))
+      (goto-char (point-min))
+      (if (re-search-forward "^\\*+ " nil t)
+          (< pos (match-beginning 0))
+        ;; No headings in file, we're in header area
+        t))))
+
+(defun dg-convert (type)
+  "Convert to a discourse graph node of TYPE.
+Automatically detects context:
+  - In file header area (before first heading): converts the file
+  - On a heading or in its body: converts that heading"
   (interactive
    (list (intern (completing-read "Type: " (mapcar #'car dg-node-types)))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Must be in an org-mode buffer"))
+  (if (dg--in-file-header-p)
+      ;; Convert file
+      (dg--convert-file type)
+    ;; Convert heading
+    (dg--convert-heading type)))
+
+(defun dg--convert-heading (type)
+  "Convert current heading to a discourse graph node of TYPE."
+  ;; Move to heading if in body
   (unless (org-at-heading-p)
-    (user-error "Not at a heading"))
+    (org-back-to-heading t))
   ;; Ensure ID exists
   (unless (org-entry-get nil "ID")
     (org-id-get-create))
+  ;; Check if already a node
+  (when (org-entry-get nil "DG_TYPE")
+    (unless (y-or-n-p "Already a node. Change type? ")
+      (user-error "Cancelled")))
   ;; Set DG_TYPE
   (org-set-property "DG_TYPE" (symbol-name type))
   (when (buffer-file-name)
     (save-buffer)
     (dg-update-file))
-  (message "Converted to [%s] node" type))
+  (message "Heading converted to [%s] node" type))
 
+(defun dg--convert-file (type)
+  "Convert current file to a file-level discourse graph node of TYPE."
+  (unless (buffer-file-name)
+    (user-error "Buffer must be visiting a file"))
+  (save-excursion
+    ;; Check if already has DG_TYPE
+    (goto-char (point-min))
+    (when (re-search-forward "^#\\+DG_TYPE:" nil t)
+      (unless (y-or-n-p "File already a node. Change type? ")
+        (user-error "Cancelled"))
+      ;; Update existing type
+      (beginning-of-line)
+      (delete-region (point) (line-end-position))
+      (insert (format "#+DG_TYPE: %s" (symbol-name type)))
+      (save-buffer)
+      (dg-update-file)
+      (message "File type changed to [%s]" type)
+      (cl-return-from dg--convert-file))
+    ;; Ensure file has an ID (denote or explicit)
+    (let ((file-id (or (dg--extract-denote-id (buffer-file-name))
+                       (dg--get-file-id))))
+      (unless file-id
+        (user-error "Could not create file ID"))
+      ;; Check for #+TITLE
+      (goto-char (point-min))
+      (unless (re-search-forward "^#\\+TITLE:" nil t)
+        (user-error "File must have a #+TITLE keyword"))
+      ;; Add #+DG_TYPE after #+TITLE or #+ID
+      (goto-char (point-min))
+      (cond
+       ((re-search-forward "^#\\+ID:.*$" nil t)
+        (end-of-line)
+        (insert (format "\n#+DG_TYPE: %s" (symbol-name type))))
+       ((re-search-forward "^#\\+TITLE:.*$" nil t)
+        (end-of-line)
+        (insert (format "\n#+DG_TYPE: %s" (symbol-name type))))
+       (t
+        (goto-char (point-min))
+        (insert (format "#+DG_TYPE: %s\n" (symbol-name type))))))
+    (save-buffer)
+    (dg-update-file)
+    (message "File converted to [%s] node" type)))
+
+(defun dg--get-file-id ()
+  "Get or create file-level ID.
+Returns existing #+ID or creates one if none exists."
+  (save-excursion
+    (goto-char (point-min))
+    (if (re-search-forward "^#\\+ID:[ \t]*\\(.+\\)" nil t)
+        (string-trim (match-string 1))
+      ;; Create new ID
+      (let ((new-id (org-id-new)))
+        (goto-char (point-min))
+        ;; Insert after title if exists, otherwise at beginning
+        (if (re-search-forward "^#\\+TITLE:.*$" nil t)
+            (progn
+              (end-of-line)
+              (insert (format "\n#+ID: %s" new-id)))
+          (insert (format "#+ID: %s\n" new-id)))
+        new-id))))
+
+;;; ============================================================
+;;; Extract Content to Heading
+;;; ============================================================
+
+(defun dg--extract-target-file ()
+  "Determine target file for extracted headings.
+Uses `dg-extract-target' which can be a string or function."
+  (let ((source (buffer-file-name)))
+    (condition-case err
+        (cond
+         ;; Function: call with source file
+         ((functionp dg-extract-target)
+          (or (funcall dg-extract-target source)
+              (expand-file-name "dg-extracts.org" (car dg-directories))))
+         ;; Absolute path
+         ((and (stringp dg-extract-target)
+               (file-name-absolute-p dg-extract-target))
+          dg-extract-target)
+         ;; Relative path: expand from first dg-directory
+         ((stringp dg-extract-target)
+          (expand-file-name dg-extract-target (car dg-directories)))
+         ;; Fallback
+         (t (expand-file-name "dg-extracts.org" (car dg-directories))))
+      (error
+       (message "Error determining extract target: %s, using default"
+                (error-message-string err))
+       (expand-file-name "dg-extracts.org" (car dg-directories))))))
+
+(defun dg--ensure-extract-file (file)
+  "Ensure extract FILE exists with proper headers.
+Creates the file and parent directories if needed."
+  (condition-case err
+      (unless (file-exists-p file)
+        (let ((dir (file-name-directory file)))
+          (when (and dir (not (file-exists-p dir)))
+            (make-directory dir t)))
+        (with-temp-file file
+          (insert (format "#+TITLE: Extracts - %s\n"
+                          (file-name-base file)))
+          (insert "#+STARTUP: showall\n\n")
+          (insert "* Extracted Notes\n")))
+    (error
+     (user-error "Cannot create extract file %s: %s"
+                 file (error-message-string err)))))
+
+(defun dg-extract-to-heading (type &optional title)
+  "Extract selected region as a heading node.
+TYPE is the node type. If region is selected, the content becomes the heading title.
+If no region, prompts for title."
+  (interactive
+   (list (intern (completing-read "Type: " (mapcar #'car dg-node-types)))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Must be in an org-mode buffer"))
+  (let* ((title (or title
+                    (if (use-region-p)
+                        (string-trim
+                         (buffer-substring-no-properties (region-beginning) (region-end)))
+                      (read-string "Title: "))))
+         (source-file (buffer-file-name))
+         (source-title (save-excursion
+                         (goto-char (point-min))
+                         (when (re-search-forward "^#\\+TITLE:[ \t]*\\(.+\\)" nil t)
+                           (string-trim (match-string 1)))))
+         (target-file (dg--extract-target-file))
+         (id (dg-generate-id (format "%s-%s-%s" type title (float-time))))
+         (formatted-title (dg--format-title type title)))
+    ;; Validate title
+    (when (string-empty-p title)
+      (user-error "Selection/title cannot be empty"))
+    (condition-case err
+        (progn
+          ;; Ensure target file exists
+          (dg--ensure-extract-file target-file)
+          ;; Append heading to target file
+          (with-current-buffer (find-file-noselect target-file)
+            (goto-char (point-min))
+            (if (re-search-forward "^\\* Extracted Notes" nil t)
+                (progn
+                  (org-end-of-subtree t t)
+                  (unless (bolp) (insert "\n")))
+              (goto-char (point-max))
+              (unless (bolp) (insert "\n")))
+            (insert (format "** %s\n" formatted-title))
+            (insert ":PROPERTIES:\n")
+            (insert (format ":ID: %s\n" id))
+            (insert (format ":DG_TYPE: %s\n" (symbol-name type)))
+            (insert ":END:\n")
+            ;; Add source link if enabled
+            (when (and dg-extract-include-source-link source-file)
+              (insert (format "\nExtracted from: [[file:%s][%s]]\n"
+                              source-file
+                              (or source-title (file-name-nondirectory source-file)))))
+            (save-buffer))
+          ;; Update the database
+          (dg-update-file target-file)
+          ;; Deactivate region
+          (when (use-region-p)
+            (deactivate-mark))
+          (message "Extracted [%s] → %s" type (file-name-nondirectory target-file))
+          id)
+      (error
+       (user-error "Failed to extract: %s" (error-message-string err))))))
+
+(defun dg-extract-question ()
+  "Extract selected content as a Question node."
+  (interactive)
+  (dg-extract-to-heading 'question))
+
+(defun dg-extract-claim ()
+  "Extract selected content as a Claim node."
+  (interactive)
+  (dg-extract-to-heading 'claim))
+
+(defun dg-extract-evidence ()
+  "Extract selected content as an Evidence node."
+  (interactive)
+  (dg-extract-to-heading 'evidence))
+
+(defun dg-extract-source ()
+  "Extract selected content as a Source node."
+  (interactive)
+  (dg-extract-to-heading 'source))
+
+;;; ============================================================
+;;; Smart Scan System
+;;; ============================================================
+
+(defun dg--record-node-file (file node-count mtime)
+  "Record FILE as containing NODE-COUNT nodes with MTIME.
+If NODE-COUNT is 0, remove the record instead (file has no nodes)."
+  (if (> node-count 0)
+      (sqlite-execute
+       (dg--db)
+       "INSERT OR REPLACE INTO node_files (file, mtime, node_count, last_scan)
+        VALUES (?, ?, ?, ?)"
+       (list file mtime node-count (float-time)))
+    ;; No nodes - remove from tracking
+    (sqlite-execute
+     (dg--db)
+     "DELETE FROM node_files WHERE file = ?"
+     (list file))))
+
+(defun dg--get-recorded-files ()
+  "Get all files recorded as having nodes."
+  (mapcar #'car
+          (sqlite-select
+           (dg--db)
+           "SELECT file FROM node_files WHERE node_count > 0")))
+
+(defun dg--get-file-record (file)
+  "Get the record for FILE from node_files table.
+Returns (mtime node_count last_scan) or nil."
+  (car (sqlite-select
+        (dg--db)
+        "SELECT mtime, node_count, last_scan FROM node_files WHERE file = ?"
+        (list file))))
+
+(defun dg--quick-probe-file (file)
+  "Quickly check if FILE likely contains DG nodes without full parsing.
+Returns t if DG_TYPE or dg_type is found in the first 10KB.
+
+Note: This may miss nodes defined after 10KB. For complete accuracy,
+use `dg-rebuild-cache' instead of `dg-smart-rebuild'."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents file nil 0 10000)  ; Only read first 10KB
+        (goto-char (point-min))
+        (or (re-search-forward "^#\\+dg_type:" nil t)
+            (re-search-forward ":DG_TYPE:" nil t)))
+    (error nil)))
+
+(defun dg--cleanup-deleted-files ()
+  "Remove records for files that no longer exist.
+Cleans up node_files, nodes, and related relations."
+  (let ((recorded (sqlite-select (dg--db) "SELECT file FROM node_files"))
+        (deleted 0))
+    (dolist (row recorded)
+      (let ((file (car row)))
+        (unless (file-exists-p file)
+          ;; Delete relations first (foreign key integrity)
+          (sqlite-execute
+           (dg--db)
+           "DELETE FROM relations WHERE source_id IN (SELECT id FROM nodes WHERE file = ?)"
+           (list file))
+          (sqlite-execute
+           (dg--db)
+           "DELETE FROM relations WHERE target_id IN (SELECT id FROM nodes WHERE file = ?)"
+           (list file))
+          ;; Then delete nodes and file record
+          (sqlite-execute (dg--db) "DELETE FROM nodes WHERE file = ?" (list file))
+          (sqlite-execute (dg--db) "DELETE FROM node_files WHERE file = ?" (list file))
+          (cl-incf deleted))))
+    (when (> deleted 0)
+      (message "Cleaned up %d deleted file(s) from database" deleted))))
+
+(defun dg--file-mtime (file)
+  "Get modification time of FILE as float.
+Returns 0 if file doesn't exist or attributes unavailable."
+  (let ((attrs (file-attributes file)))
+    (if attrs
+        (float-time (file-attribute-modification-time attrs))
+      0)))
+
+(defun dg-smart-rebuild ()
+  "Intelligently rebuild the database.
+- Files known to have nodes: always full scan
+- Files with changed mtime: full scan
+- Other files: quick probe, full scan only if nodes detected
+This is much faster than full rebuild for large collections."
+  (interactive)
+  ;; First, clean up records for deleted files
+  (dg--cleanup-deleted-files)
+  (let* ((all-files (dg--collect-files))
+         (recorded-files (dg--get-recorded-files))
+         (recorded-set (make-hash-table :test 'equal))
+         (collected-nodes '())
+         (collected-relations '())
+         (collected-file-records '())
+         (scanned-count 0)
+         (probed-count 0)
+         (new-node-files 0))
+    ;; Build hash set of recorded files
+    (dolist (f recorded-files)
+      (puthash f t recorded-set))
+    (message "Smart scan: %d files total, %d known to have nodes..."
+             (length all-files) (length recorded-files))
+    ;; Phase 1: Collect all data (no writes yet)
+    (dolist (file all-files)
+      (when (file-exists-p file)
+        (let* ((current-mtime (dg--file-mtime file))
+               (record (dg--get-file-record file))
+               (recorded-mtime (and record (nth 0 record)))
+               (is-recorded (gethash file recorded-set))
+               (needs-scan nil))
+          (cond
+           ;; Known node file - always scan
+           (is-recorded
+            (setq needs-scan t))
+           ;; New or changed file - quick probe
+           ((or (null record)
+                (> current-mtime (or recorded-mtime 0)))
+            (cl-incf probed-count)
+            (when (dg--quick-probe-file file)
+              (setq needs-scan t)
+              (cl-incf new-node-files)))
+           ;; Unchanged file with no nodes - skip
+           (t nil))
+          ;; Full scan if needed
+          (when needs-scan
+            (cl-incf scanned-count)
+            (condition-case err
+                (let* ((result (dg--scan-file file))
+                       (nodes (car result))
+                       (relations (cdr result))
+                       (file-node-count (length nodes)))
+                  ;; Collect results
+                  (dolist (node nodes)
+                    (push node collected-nodes))
+                  (dolist (rel relations)
+                    (push rel collected-relations))
+                  (push (list file file-node-count current-mtime) collected-file-records))
+              (error
+               (message "Warning: Error scanning %s: %s"
+                        file (error-message-string err))))))))
+    ;; Phase 2: Write to database (atomic-ish)
+    (condition-case err
+        (progn
+          (let ((inhibit-message t))
+            (sqlite-execute (dg--db) "DELETE FROM relations")
+            (sqlite-execute (dg--db) "DELETE FROM nodes"))
+          ;; Write collected data
+          (dolist (node collected-nodes)
+            (dg--save-node node))
+          (dolist (rel collected-relations)
+            (dg--save-relation rel))
+          (dolist (rec collected-file-records)
+            (dg--record-node-file (nth 0 rec) (nth 1 rec) (nth 2 rec)))
+          (message "Smart scan complete: %d nodes, %d relations (scanned %d, probed %d, found %d new)"
+                   (length collected-nodes) (length collected-relations)
+                   scanned-count probed-count new-node-files))
+      (error
+       (message "Error during database write: %s" (error-message-string err))))))
+
+(defun dg-rebuild-cache ()
+  "Completely rebuild the database from all configured directories.
+Unlike `dg-smart-rebuild', this always does a full scan of all files."
+  (interactive)
+  (let ((inhibit-message t)
+        (message-log-max nil))
+    (sqlite-execute (dg--db) "DELETE FROM relations")
+    (sqlite-execute (dg--db) "DELETE FROM nodes")
+    (sqlite-execute (dg--db) "DELETE FROM node_files"))
+  (let ((files (dg--collect-files))
+        (node-count 0)
+        (rel-count 0)
+        (file-count 0)
+        (total-files 0))
+    (setq total-files (length files))
+    (message "Discourse Graph: scanning %d files..." total-files)
+    (dolist (file files)
+      (cl-incf file-count)
+      ;; Show progress every 10 files
+      (when (= 0 (mod file-count 10))
+        (message "Discourse Graph: scanning... %d/%d" file-count total-files))
+      (let* ((inhibit-message t)
+             (message-log-max nil)
+             (result (dg--scan-file file))
+             (nodes (car result))
+             (relations (cdr result))
+             (file-node-count (length nodes))
+             (mtime (dg--file-mtime file)))
+        (dolist (node nodes)
+          (dg--save-node node)
+          (cl-incf node-count))
+        (dolist (rel relations)
+          (dg--save-relation rel)
+          (cl-incf rel-count))
+        ;; Record file for smart scan
+        (dg--record-node-file file file-node-count mtime)))
+    (message "Discourse Graph: indexed %d nodes, %d relations from %d files"
+             node-count rel-count total-files)))
 
 ;;; ============================================================
 ;;; Relation Management
@@ -1594,40 +1992,74 @@ More intuitive: select a node, pick relation type, see results."
             (match-string 1 path)))
          (t nil))))))
 
+(defun dg--check-relation-anomaly (source-type rel-type target-type)
+  "Check if relation violates canonical patterns.
+Returns nil if canonical, or a warning string if anomalous."
+  (let* ((pattern (alist-get rel-type dg-relation-patterns))
+         (valid-sources (plist-get pattern :source))
+         (valid-targets (plist-get pattern :target))
+         (source-ok (or (null valid-sources) (memq source-type valid-sources)))
+         (target-ok (or (null valid-targets) (memq target-type valid-targets))))
+    (cond
+     ((and (not source-ok) (not target-ok))
+      (format "Anomaly: %s → %s → %s (expected %s → %s)"
+              source-type rel-type target-type
+              valid-sources valid-targets))
+     ((not source-ok)
+      (format "Anomaly: %s cannot typically '%s' (expected source: %s)"
+              source-type rel-type valid-sources))
+     ((not target-ok)
+      (format "Anomaly: '%s' typically targets %s, not %s"
+              rel-type valid-targets target-type))
+     (t nil))))
+
 (defun dg-link (rel-type &optional with-note)
   "Add relation from current node.
 If cursor is on a link, use that as target; otherwise prompt.
 REL-TYPE is the relation type symbol.
-With prefix argument (WITH-NOTE), also prompt for context note."
+With prefix argument (WITH-NOTE), also prompt for context note.
+
+Relations violating canonical patterns in `dg-relation-patterns'
+are allowed but flagged as argumentative anomalies."
   (interactive
    (list (intern (completing-read
                   "Relation: "
                   (mapcar #'car dg-relation-types)
                   nil t))
          current-prefix-arg))
-  (let ((source-id (dg--get-id-at-point)))
+  (let* ((source-id (dg--get-id-at-point))
+         (source-node (and source-id (dg-get source-id)))
+         (source-type (and source-node (intern (plist-get source-node :type)))))
     (unless source-id
       (user-error "Not on a discourse node"))
     (let* ((link-target (dg--link-id-at-point))
            (target-id (or link-target
                           (dg--completing-read-node "Target: "))))
       (when target-id
-        (let* ((prop (concat "DG_" (upcase (symbol-name rel-type))))
-               (note-prop (concat prop "_NOTE"))
-               (existing (org-entry-get nil prop))
-               (note (when with-note
-                       (read-string "Context note (why this relation?): "))))
-          (org-set-property prop
-                            (if existing
-                                (concat existing " " target-id)
-                              target-id))
-          (when (and note (not (string-empty-p note)))
-            (org-set-property note-prop note))
-          (let ((target-node (dg-get target-id)))
-            (message "%s -> %s%s (save to update)"
-                     rel-type
-                     (or (plist-get target-node :title) target-id)
-                     (if note " [with note]" ""))))))))
+        (let* ((target-node (dg-get target-id))
+               (target-type (and target-node (intern (plist-get target-node :type))))
+               (anomaly (dg--check-relation-anomaly source-type rel-type target-type))
+               (proceed t))
+          ;; Warn about anomaly but allow
+          (when (and anomaly dg-warn-relation-anomalies)
+            (setq proceed (y-or-n-p (format "%s. Create anyway? " anomaly))))
+          (when proceed
+            (let* ((prop (concat "DG_" (upcase (symbol-name rel-type))))
+                   (note-prop (concat prop "_NOTE"))
+                   (existing (org-entry-get nil prop))
+                   (note (when with-note
+                           (read-string "Context note (why this relation?): "))))
+              (org-set-property prop
+                                (if existing
+                                    (concat existing " " target-id)
+                                  target-id))
+              (when (and note (not (string-empty-p note)))
+                (org-set-property note-prop note))
+              (message "%s → %s%s%s (save to update)"
+                       rel-type
+                       (or (plist-get target-node :title) target-id)
+                       (if note " [with note]" "")
+                       (if anomaly " [ANOMALY]" "")))))))))
 
 (defun dg-remove-relation ()
   "Remove a relation from current node.
@@ -1695,7 +2127,7 @@ but will be ignored until DG_TYPE is set again."
 (defcustom dg-graphviz-command "dot"
   "Graphviz command for rendering graphs."
   :type 'string
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defun dg--dot-escape (str)
   "Escape STR for use in DOT labels."
@@ -1890,12 +2322,12 @@ The SVG uses CSS variables for colors, suitable for light/dark mode."
 (defface dg-overlay-face
   '((t :foreground "gray60"))
   "Face for discourse graph overlay indicators."
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defface dg-context-note-label
   '((t :inherit font-lock-keyword-face))
   "Face for relation type label in context notes."
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 (defun dg--make-overlay-string (id)
   "Create overlay string for node ID using customizable attributes."
@@ -1909,7 +2341,7 @@ The SVG uses CSS variables for colors, suitable for light/dark mode."
 (defun dg-overlay-update ()
   "Update overlays for all discourse nodes in current buffer."
   (interactive)
-  (when (and discourse-graph-mode
+  (when (and discourse-graphs-mode
              dg-overlay-enable
              (derived-mode-p 'org-mode))
     (dg-overlay-clear)
@@ -2085,34 +2517,55 @@ DEPTH controls how many levels of relations to include (default 2)."
   ["Discourse Graph"
    ["Create"
     ("c" "Create node..." dg-create-node)
-    ("C" "Convert heading" dg-convert-to-node)
+    ("C" "Convert to node" dg-convert)
     ("q" "Question" dg-create-question)
     ("l" "Claim" dg-create-claim)
     ("e" "Evidence" dg-create-evidence)
     ("s" "Source" dg-create-source)]
+   ["Extract (region→node)"
+    ("X" "Extract..." dg-extract-to-heading)
+    ("x q" "Extract Question" dg-extract-question)
+    ("x l" "Extract Claim" dg-extract-claim)
+    ("x e" "Extract Evidence" dg-extract-evidence)
+    ("x s" "Extract Source" dg-extract-source)]
    ["Relations"
     ("r" "Add relation" dg-link)
-    ("D" "Remove relation" dg-remove-relation)]
-   ["Navigate"
+    ("R" "Remove relation" dg-remove-relation)]]
+  [["Navigate"
     ("g" "Go to node" dg-goto-node)
-    ("x" "Toggle context" dg-context-toggle)
+    ("t" "Toggle context" dg-context-toggle)
     ("b" "Go back" dg-context-go-back)
-    ("p" "Graph preview" dg-graph-preview)]]
-  [["Analysis"
+    ("p" "Graph preview" dg-graph-preview)]
+   ["Analysis"
     ("S" "Synthesis" dg-synthesis-open)
     ("A" "Analyze question" dg-analyze-question)
-    ("?" "Query this node" dg-query-relations)]
-   ["Export"
+    ("Q" "Query builder" dg-query-builder)
+    ("I" "Node index" dg-insert-node-index)]]
+  [["Export"
     ("E s" "SVG" dg-export-svg)
-    ("E m" "Markdown" dg-export-markdown)]]
-  [["Maintain"
-    ("!" "Rebuild cache" dg-rebuild-cache)
+    ("E m" "Markdown" dg-export-markdown)]
+   ["Maintain"
+    ("!" "Full rebuild" dg-rebuild-cache)
+    ("@" "Smart rebuild" dg-smart-rebuild)
     ("v" "Validate" dg-validate)]
    ["Display"
     ("o" "Toggle overlays" dg-overlay-toggle)
     ("d" "Detailed overlay" dg-use-detailed-overlay)
     ("D" "Simple overlay" dg-use-simple-overlay)
     ("W" "Configure..." dg-configure)]])
+
+(defun dg-insert-node-index ()
+  "Insert a node index dblock at point."
+  (interactive)
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Must be in an org-mode buffer"))
+  (let ((show-stats (y-or-n-p "Show statistics? ")))
+    (insert (format "#+BEGIN: dg-node-index%s\n"
+                    (if show-stats " :stats t" "")))
+    (insert "#+END:\n")
+    (forward-line -1)
+    (org-update-dblock)
+    (message "Node index inserted")))
 
 (transient-define-prefix dg-configure ()
   "Discourse Graph configuration."
@@ -2124,11 +2577,25 @@ DEPTH controls how many levels of relations to include (default 2)."
     ("o" "Overlay enable" dg--toggle-overlay)
     ("a" "Auto-update context" dg--toggle-auto-update)
     ("w" "Context width" dg--set-context-width)]
+   ["Extract"
+    ("x" "Set extract target" dg--set-extract-target)]
    ["Denote"
     ("D" "Use denote" dg--toggle-denote)
     ("K" "Keywords as type" dg--toggle-keywords-type)]
    ["Export"
     ("l" "Link style" dg--cycle-link-style)]])
+
+(defun dg--set-extract-target ()
+  "Set extract target file."
+  (interactive)
+  (let ((target (read-file-name "Extract target file: "
+                                (car dg-directories)
+                                nil nil
+                                (if (stringp dg-extract-target)
+                                    dg-extract-target
+                                  "dg-extracts.org"))))
+    (setq dg-extract-target target)
+    (message "Extract target: %s" target)))
 
 (defun dg--set-directories ()
   "Set discourse graph directories."
@@ -2183,12 +2650,393 @@ DEPTH controls how many levels of relations to include (default 2)."
   (message "Link style: %s" dg-export-link-style))
 
 ;;; ============================================================
+;;; Query Builder (Transient-based dblock creation)
+;;; ============================================================
+
+(defvar dg--qb-node-id nil "Query builder: selected node ID.")
+(defvar dg--qb-node-type nil "Query builder: filter by node type.")
+(defvar dg--qb-direction 'both "Query builder: relation direction.")
+(defvar dg--qb-relation nil "Query builder: relation type filter.")
+
+(defun dg--qb-status-line ()
+  "Generate status line for query builder."
+  (format "Query Builder%s"
+          (if dg--qb-node-id
+              (format " [%s]"
+                      (truncate-string-to-width
+                       (or (plist-get (dg-get dg--qb-node-id) :title) dg--qb-node-id)
+                       30 nil nil "…"))
+            "")))
+
+(defun dg--qb-set-node ()
+  "Set node filter for query builder."
+  (interactive)
+  (let ((choice (condition-case nil
+                    (dg--completing-read-node "Select node (C-g to cancel): ")
+                  (quit nil))))
+    (when choice
+      (setq dg--qb-node-id choice)))
+  (transient-setup 'dg-query-builder))
+
+(defun dg--qb-set-type ()
+  "Set type filter for query builder."
+  (interactive)
+  (let ((choice (condition-case nil
+                    (completing-read
+                     "Node type (C-g to cancel): "
+                     (cons "all" (mapcar (lambda (x) (symbol-name (car x))) dg-node-types)))
+                  (quit nil))))
+    (when choice
+      (setq dg--qb-node-type (unless (string= choice "all") choice))))
+  (transient-setup 'dg-query-builder))
+
+(defun dg--qb-cycle-direction ()
+  "Cycle through direction options."
+  (interactive)
+  (setq dg--qb-direction
+        (pcase dg--qb-direction
+          ('both 'outgoing)
+          ('outgoing 'incoming)
+          ('incoming 'both)))
+  (transient-setup 'dg-query-builder))
+
+(defun dg--qb-set-relation ()
+  "Set relation filter for query builder."
+  (interactive)
+  (let ((choice (condition-case nil
+                    (completing-read
+                     "Relation (C-g to cancel): "
+                     (cons "all" (mapcar (lambda (x) (symbol-name (car x))) dg-relation-types)))
+                  (quit nil))))
+    (when choice
+      (setq dg--qb-relation (unless (string= choice "all") choice))))
+  (transient-setup 'dg-query-builder))
+
+(defun dg--qb-clear ()
+  "Clear all query builder filters."
+  (interactive)
+  (setq dg--qb-node-id nil
+        dg--qb-node-type nil
+        dg--qb-direction 'both
+        dg--qb-relation nil)
+  (transient-setup 'dg-query-builder))
+
+(defun dg--qb-build-params ()
+  "Build dblock parameter string from current selections."
+  (string-join
+   (delq nil
+         (list (when dg--qb-node-id (format ":id \"%s\"" dg--qb-node-id))
+               (when dg--qb-node-type (format ":type %s" dg--qb-node-type))
+               (format ":direction %s" dg--qb-direction)
+               (when dg--qb-relation (format ":relation %s" dg--qb-relation))))
+   " "))
+
+(defun dg--synthesis-goto-heading (heading-name)
+  "Go to HEADING-NAME in synthesis file, creating it if needed.
+Opens the synthesis file and positions point at the end of the heading's content."
+  (let ((path (dg--synthesis-file-path)))
+    ;; Create synthesis file if it doesn't exist
+    (unless (file-exists-p path)
+      (dg--synthesis-create path))
+    (find-file path)
+    ;; Find or create the heading
+    (goto-char (point-min))
+    (if (re-search-forward (format "^\\* %s$" (regexp-quote heading-name)) nil t)
+        (progn
+          ;; Go to end of this heading's content (before next heading or EOF)
+          (org-end-of-subtree t)
+          ;; Make sure we're on a new line
+          (unless (bolp) (insert "\n"))
+          ;; Add blank line if needed
+          (unless (looking-back "\n\n" (- (point) 2))
+            (insert "\n")))
+      ;; Heading doesn't exist, create it at the end
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert (format "\n* %s\n\n" heading-name)))))
+
+(defun dg--qb-insert ()
+  "Insert the configured dblock into synthesis file under Custom Queries."
+  (interactive)
+  (dg--synthesis-goto-heading "Custom Queries")
+  (let ((params (dg--qb-build-params))
+        (query-name (cond
+                     (dg--qb-node-id
+                      (truncate-string-to-width
+                       (or (plist-get (dg-get dg--qb-node-id) :title) dg--qb-node-id)
+                       40 nil nil "…"))
+                     (dg--qb-node-type dg--qb-node-type)
+                     (t "All nodes"))))
+    (insert (format "** Query: %s\n" query-name))
+    (let ((dblock-start (point)))
+      (insert (format "#+BEGIN: dg-query %s\n" params))
+      (insert "#+END:\n\n")
+      ;; Move back to the #+BEGIN: line for org-update-dblock
+      (goto-char dblock-start)
+      (org-update-dblock))
+    (save-buffer)
+    ;; Clear query builder state
+    (setq dg--qb-node-id nil
+          dg--qb-node-type nil
+          dg--qb-direction 'both
+          dg--qb-relation nil)
+    (message "Query added to Custom Queries")))
+
+(transient-define-prefix dg-query-builder ()
+  "Build and insert a discourse graph query dblock."
+  [:description dg--qb-status-line
+   ["Filters"
+    ("n" dg--qb-set-node
+     :description (lambda () (format "Node: %s"
+                                     (if dg--qb-node-id
+                                         (truncate-string-to-width
+                                          (or (plist-get (dg-get dg--qb-node-id) :title) "?")
+                                          20 nil nil "…")
+                                       "all"))))
+    ("t" dg--qb-set-type
+     :description (lambda () (format "Type: %s" (or dg--qb-node-type "all"))))
+    ("d" dg--qb-cycle-direction
+     :description (lambda () (format "Direction: %s" dg--qb-direction)))
+    ("r" dg--qb-set-relation
+     :description (lambda () (format "Relation: %s" (or dg--qb-relation "all"))))]
+   ["Actions"
+    ("RET" "Add to Synthesis" dg--qb-insert)
+    ("c" "Clear filters" dg--qb-clear)
+    ("q" "Quit" transient-quit-one)]])
+
+;;; ============================================================
+;;; dg-query: General query dblock
+;;; ============================================================
+
+(defun org-dblock-write:dg-query (params)
+  "Execute a discourse graph query and display results.
+Parameters:
+  :id        - Node ID to query relations for (optional)
+  :type      - Filter nodes by type: question, claim, evidence, source
+  :direction - Relation direction: outgoing, incoming, both (default: both)
+  :relation  - Filter by relation type: supports, opposes, informs, answers
+  :limit     - Maximum number of results (default: 50)"
+  (let* ((node-id (plist-get params :id))
+         (node-type (plist-get params :type))
+         (direction (or (plist-get params :direction) 'both))
+         (rel-type (plist-get params :relation))
+         (limit (or (plist-get params :limit) 50)))
+    (insert (format "/Updated: %s/\n\n" (format-time-string "%Y-%m-%d %H:%M")))
+    (cond
+     ;; Query relations for a specific node
+     (node-id
+      (let* ((node (dg-get node-id))
+             (rels (dg-get-relations node-id))
+             (outgoing (plist-get rels :outgoing))
+             (incoming (plist-get rels :incoming)))
+        (unless node
+          (insert (format "/Node not found: %s/\n" node-id))
+          (cl-return-from org-dblock-write:dg-query))
+        ;; Filter by relation type
+        (when rel-type
+          (let ((rel-str (if (symbolp rel-type) (symbol-name rel-type) rel-type)))
+            (setq outgoing (seq-filter (lambda (r) (string= (nth 1 r) rel-str)) outgoing))
+            (setq incoming (seq-filter (lambda (r) (string= (nth 1 r) rel-str)) incoming))))
+        ;; Display outgoing
+        (when (and outgoing (memq direction '(outgoing both)))
+          (let ((grouped (seq-group-by (lambda (r) (nth 1 r)) outgoing)))
+            (dolist (group grouped)
+              (insert (format "*%s* (%d)\n"
+                              (capitalize (car group)) (length (cdr group))))
+              (dolist (r (seq-take (cdr group) limit))
+                (insert (format "  - [[dg:%s][%s]] /%s/\n"
+                                (nth 2 r)
+                                (or (nth 3 r) (nth 2 r))
+                                (or (nth 4 r) "?"))))
+              (insert "\n"))))
+        ;; Display incoming
+        (when (and incoming (memq direction '(incoming both)))
+          (let ((grouped (seq-group-by (lambda (r) (nth 1 r)) incoming)))
+            (dolist (group grouped)
+              (let* ((rel-sym (intern (car group)))
+                     (rel-info (alist-get rel-sym dg-relation-types))
+                     (inverse (or (plist-get rel-info :inverse) (car group))))
+                (insert (format "*%s* (%d)\n" inverse (length (cdr group))))
+                (dolist (r (seq-take (cdr group) limit))
+                  (insert (format "  - [[dg:%s][%s]] /%s/\n"
+                                  (nth 2 r)
+                                  (or (nth 3 r) (nth 2 r))
+                                  (or (nth 4 r) "?"))))
+                (insert "\n")))))
+        ;; No results
+        (when (and (null outgoing) (null incoming))
+          (insert "/No relations found./\n"))))
+     ;; Query all nodes, optionally filtered by type
+     (t
+      (let* ((nodes (if node-type
+                        (dg-find-by-type (if (symbolp node-type) node-type (intern node-type)))
+                      (dg-all-nodes)))
+             (limited (seq-take nodes limit)))
+        (insert (format "*Nodes* (%d%s)\n\n"
+                        (length limited)
+                        (if (> (length nodes) limit)
+                            (format " of %d" (length nodes))
+                          "")))
+        (if (null limited)
+            (insert "/No nodes found./\n")
+          (insert "| Node | Type |\n")
+          (insert "|---+---|\n")
+          (dolist (n limited)
+            (let* ((type-sym (intern (plist-get n :type)))
+                   (type-info (alist-get type-sym dg-node-types))
+                   (short (plist-get type-info :short)))
+              (insert (format "| [[dg:%s][%s]] | %s |\n"
+                              (plist-get n :id)
+                              (truncate-string-to-width (plist-get n :title) 50 nil nil "…")
+                              short))))
+          (org-table-align)))))))
+
+;;; ============================================================
+;;; dg-node-index: Node index by type dblock
+;;; ============================================================
+
+(defun org-dblock-write:dg-node-index (params)
+  "Generate a node index grouped by type.
+Parameters:
+  :type   - Show only nodes of this type (optional)
+  :stats  - If non-nil, show relation counts (default: nil)
+  :sort   - Sort by: title, date (default: title)
+  :limit  - Maximum nodes per type (default: unlimited)"
+  (let* ((type-filter (plist-get params :type))
+         (show-stats (plist-get params :stats))
+         (sort-by (or (plist-get params :sort) 'title))
+         (limit-per-type (plist-get params :limit))
+         (nodes (if type-filter
+                    (dg-find-by-type (if (symbolp type-filter)
+                                         type-filter
+                                       (intern type-filter)))
+                  (dg-all-nodes)))
+         (grouped (seq-group-by (lambda (n) (plist-get n :type)) nodes)))
+    (insert (format "/Updated: %s | Total: %d nodes/\n\n"
+                    (format-time-string "%Y-%m-%d %H:%M")
+                    (length nodes)))
+    (if (null grouped)
+        (insert "/No discourse graph nodes found./\n")
+      (dolist (group grouped)
+        (let* ((type-str (car group))
+               (type-sym (intern type-str))
+               (type-info (alist-get type-sym dg-node-types))
+               (short (or (plist-get type-info :short) "?"))
+               (desc (or (plist-get type-info :desc) type-str))
+               (type-nodes (cdr group))
+               ;; Sort nodes
+               (sorted (pcase sort-by
+                         ('title (seq-sort-by (lambda (n) (plist-get n :title))
+                                              #'string< type-nodes))
+                         ('date (seq-sort-by (lambda (n) (plist-get n :id))
+                                             #'string> type-nodes))
+                         (_ type-nodes)))
+               (limited (if limit-per-type
+                            (seq-take sorted limit-per-type)
+                          sorted)))
+          (insert (format "*%s - %s* (%d)\n" short desc (length type-nodes)))
+          (dolist (n limited)
+            (let ((id (plist-get n :id))
+                  (title (plist-get n :title)))
+              (if show-stats
+                  (let* ((attrs (dg-get-all-attributes id))
+                         (stats (funcall dg-overlay-format-function attrs type-sym)))
+                    (if (and stats (not (string-empty-p stats)))
+                        (insert (format "  - [[dg:%s][%s]] %s\n" id title stats))
+                      (insert (format "  - [[dg:%s][%s]]\n" id title))))
+                (insert (format "  - [[dg:%s][%s]]\n" id title)))))
+          (when (and limit-per-type (> (length type-nodes) limit-per-type))
+            (insert (format "  /... and %d more/\n"
+                            (- (length type-nodes) limit-per-type))))
+          (insert "\n"))))))
+
+;;; ============================================================
+;;; dg-relation-anomalies: Find non-canonical relations
+;;; ============================================================
+
+(defun dg--find-all-anomalies ()
+  "Find all relations that violate canonical patterns.
+Returns list of (source-node rel-type target-node anomaly-msg)."
+  (let ((relations (sqlite-select
+                    (dg--db)
+                    "SELECT r.source_id, r.rel_type, r.target_id,
+                            s.type as source_type, s.title as source_title,
+                            t.type as target_type, t.title as target_title
+                     FROM relations r
+                     JOIN nodes s ON r.source_id = s.id
+                     JOIN nodes t ON r.target_id = t.id"))
+        (anomalies nil))
+    (dolist (row relations)
+      (let* ((source-id (nth 0 row))
+             (rel-type (intern (nth 1 row)))
+             (target-id (nth 2 row))
+             (source-type (intern (nth 3 row)))
+             (source-title (nth 4 row))
+             (target-type (intern (nth 5 row)))
+             (target-title (nth 6 row))
+             (anomaly (dg--check-relation-anomaly source-type rel-type target-type)))
+        (when anomaly
+          (push (list :source-id source-id
+                      :source-title source-title
+                      :source-type source-type
+                      :rel-type rel-type
+                      :target-id target-id
+                      :target-title target-title
+                      :target-type target-type
+                      :message anomaly)
+                anomalies))))
+    (nreverse anomalies)))
+
+(defun org-dblock-write:dg-relation-anomalies (params)
+  "List relations that violate canonical argumentative patterns.
+These are not errors but may indicate areas for review.
+Parameters:
+  :grouped - If non-nil, group by anomaly type (default: nil)"
+  (let* ((grouped (plist-get params :grouped))
+         (anomalies (dg--find-all-anomalies)))
+    (insert (format "/Updated: %s/\n\n" (format-time-string "%Y-%m-%d %H:%M")))
+    (if (null anomalies)
+        (insert "/No argumentative anomalies found. All relations follow canonical patterns./\n")
+      (insert (format "/Found %d anomalous relation%s:/\n\n"
+                      (length anomalies)
+                      (if (= 1 (length anomalies)) "" "s")))
+      (if grouped
+          ;; Group by relation type
+          (let ((by-rel (seq-group-by (lambda (a) (plist-get a :rel-type)) anomalies)))
+            (dolist (group by-rel)
+              (insert (format "*%s* (%d)\n" (capitalize (symbol-name (car group))) (length (cdr group))))
+              (dolist (a (cdr group))
+                (let* ((stype (plist-get a :source-type))
+                       (ttype (plist-get a :target-type))
+                       (type-info-s (alist-get stype dg-node-types))
+                       (type-info-t (alist-get ttype dg-node-types))
+                       (short-s (or (plist-get type-info-s :short) "?"))
+                       (short-t (or (plist-get type-info-t :short) "?")))
+                  (insert (format "  - [%s] [[dg:%s][%s]] → [%s] [[dg:%s][%s]]\n"
+                                  short-s (plist-get a :source-id) (plist-get a :source-title)
+                                  short-t (plist-get a :target-id) (plist-get a :target-title)))))
+              (insert "\n")))
+        ;; Flat list
+        (dolist (a anomalies)
+          (let* ((stype (plist-get a :source-type))
+                 (ttype (plist-get a :target-type))
+                 (rel (plist-get a :rel-type))
+                 (type-info-s (alist-get stype dg-node-types))
+                 (type-info-t (alist-get ttype dg-node-types))
+                 (short-s (or (plist-get type-info-s :short) "?"))
+                 (short-t (or (plist-get type-info-t :short) "?")))
+            (insert (format "- [%s] [[dg:%s][%s]] =%s= [%s] [[dg:%s][%s]]\n"
+                            short-s (plist-get a :source-id) (plist-get a :source-title)
+                            rel
+                            short-t (plist-get a :target-id) (plist-get a :target-title)))))))))
+
+;;; ============================================================
 ;;; Hooks and Auto-update
 ;;; ============================================================
 
 (defun dg--after-save-hook ()
   "Hook to update index after saving org file."
-  (when (and discourse-graph-mode
+  (when (and discourse-graphs-mode
              (derived-mode-p 'org-mode)
              (buffer-file-name))
     (dg-update-file)
@@ -2205,7 +3053,7 @@ DEPTH controls how many levels of relations to include (default 2)."
 
 (defun dg--post-command-hook ()
   "Hook to auto-update context when moving to different node."
-  (when (and discourse-graph-mode
+  (when (and discourse-graphs-mode
              dg-context-auto-update
              (derived-mode-p 'org-mode)
              ;; Don't trigger in context buffer itself
@@ -2243,12 +3091,13 @@ DEPTH controls how many levels of relations to include (default 2)."
     ;; Core commands only - use C-c d d for full menu
     (define-key map (kbd "C-c d d") #'dg-menu)       ; Main menu
     (define-key map (kbd "C-c d c") #'dg-create-node) ; Create
+    (define-key map (kbd "C-c d C") #'dg-convert)     ; Convert (smart)
     (define-key map (kbd "C-c d r") #'dg-link)        ; Relation
     (define-key map (kbd "C-c d x") #'dg-context-toggle) ; Context
     (define-key map (kbd "C-c d g") #'dg-goto-node)   ; Go to
     (define-key map (kbd "C-c d !") #'dg-rebuild-cache) ; Rebuild
     map)
-  "Keymap for `discourse-graph-mode'.
+  "Keymap for `discourse-graphs-mode'.
 Only essential commands are bound. Use \\[dg-menu] for full menu.")
 
 ;;; ============================================================
@@ -2256,12 +3105,13 @@ Only essential commands are bound. Use \\[dg-menu] for full menu.")
 ;;; ============================================================
 
 ;;;###autoload
-(define-minor-mode discourse-graph-mode
+(define-minor-mode discourse-graphs-mode
   "Minor mode for discourse graph knowledge synthesis.
 
 Key bindings:
   \\[dg-menu]           Open main menu (discover all commands)
   \\[dg-create-node]    Create a new node
+  \\[dg-convert]        Convert heading/file to node (context-aware)
   \\[dg-link]           Add relation (smart: uses link at point or prompts)
   \\[dg-context-toggle] Toggle context panel
   \\[dg-goto-node]      Jump to a node
@@ -2271,7 +3121,7 @@ All other commands available via \\[dg-menu]."
   :global t
   :lighter " DG"
   :keymap dg-mode-map
-  (if discourse-graph-mode
+  (if discourse-graphs-mode
       (progn
         (add-hook 'after-save-hook #'dg--after-save-hook)
         (add-hook 'post-command-hook #'dg--post-command-hook)
@@ -2303,8 +3153,8 @@ All other commands available via \\[dg-menu]."
     (message "Discourse Graph mode disabled")))
 
 (defun dg--org-mode-setup ()
-  "Setup for org-mode buffers when discourse-graph-mode is active."
-  (when discourse-graph-mode
+  "Setup for org-mode buffers when discourse-graphs-mode is active."
+  (when discourse-graphs-mode
     ;; Update overlays after a short delay
     (run-with-idle-timer 1 nil #'dg-overlay-update)))
 
@@ -2316,7 +3166,7 @@ All other commands available via \\[dg-menu]."
 (defcustom dg-synthesis-file nil
   "Path to the synthesis file. If nil, uses dg-directories."
   :type '(choice (const nil) file)
-  :group 'discourse-graph)
+  :group 'discourse-graphs)
 
 ;;; ============================================================
 ;;; Core Analysis Functions
@@ -2634,7 +3484,17 @@ Returns list of gap types."
     (insert "#+BEGIN: dg-unanswered-opposition\n#+END:\n\n")
     (insert "* Structural Gaps\n")
     (insert "/Claims with incomplete argument chains/\n\n")
-    (insert "#+BEGIN: dg-argument-gaps\n#+END:\n\n")))
+    (insert "#+BEGIN: dg-argument-gaps\n#+END:\n\n")
+    (insert "* Argumentative Anomalies\n")
+    (insert "/Relations that violate canonical patterns (may need review)/\n\n")
+    (insert "#+BEGIN: dg-relation-anomalies :grouped t\n#+END:\n\n")
+    (insert "* Custom Queries\n")
+    (insert "/User-defined queries are added below/\n\n")
+    (insert "* Node Index\n")
+    (insert ":PROPERTIES:\n")
+    (insert ":VISIBILITY: folded\n")
+    (insert ":END:\n")
+    (insert "#+BEGIN: dg-node-index :stats t\n#+END:\n\n")))
 
 ;;; ============================================================
 ;;; Interactive Commands
@@ -2680,5 +3540,5 @@ Returns list of gap types."
    ((dg-get ref) ref)
    (t (plist-get (car (dg-find-by-title ref)) :id))))
 
-(provide 'discourse-graph)
-;;; discourse-graph.el ends here
+(provide 'discourse-graphs)
+;;; discourse-graphs.el ends here
