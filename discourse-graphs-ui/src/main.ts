@@ -450,16 +450,55 @@ class DiscourseGraphsUI {
       nodeIds.has((l.target as Node).id || (l.target as string))
     );
     
+    // Preserve node positions from previous state
+    const currentData = this.graph.graphData();
+    const positionMap = new Map<string, { x: number; y: number; vx?: number; vy?: number }>();
+    
+    if (currentData && currentData.nodes) {
+      currentData.nodes.forEach((node: any) => {
+        if (node.x !== undefined && node.y !== undefined) {
+          positionMap.set(node.id, { 
+            x: node.x, 
+            y: node.y,
+            vx: node.vx || 0,
+            vy: node.vy || 0
+          });
+        }
+      });
+    }
+    
+    // Restore positions to filtered nodes
+    filteredNodes.forEach(node => {
+      const savedPos = positionMap.get(node.id);
+      if (savedPos) {
+        node.x = savedPos.x;
+        node.y = savedPos.y;
+        node.vx = savedPos.vx;
+        node.vy = savedPos.vy;
+        // Don't fix position, allow gentle adjustment
+        node.fx = null;
+        node.fy = null;
+      }
+    });
+    
+    // Update graph data
     this.graph.graphData({ nodes: filteredNodes, links: filteredLinks });
     
     // Update stats
     document.getElementById('nodeCount')!.textContent = filteredNodes.length.toString();
     document.getElementById('linkCount')!.textContent = filteredLinks.length.toString();
     
-    // Auto-fit view
+    // Gently reheat simulation for new nodes to settle
+    // Use lower alpha for smoother transition
+    const d3Sim = this.graph.d3Force('simulation');
+    if (d3Sim) {
+      d3Sim.alpha(0.3).restart();
+    }
+    
+    // Auto-fit view with smooth animation
     if (filteredNodes.length > 0) {
       setTimeout(() => {
-        this.graph.zoomToFit(400, 50);
+        this.graph.zoomToFit(800, 50); // Longer duration for smoother zoom
       }, 100);
     }
   }

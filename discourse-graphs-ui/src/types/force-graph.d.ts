@@ -28,7 +28,8 @@ declare module 'force-graph' {
 
   export interface ForceGraphInstance {
     (element: HTMLElement): ForceGraphInstance;
-    graphData(data: GraphData): ForceGraphInstance;
+    graphData(): GraphData;  // Getter: returns current graph data
+    graphData(data: GraphData): ForceGraphInstance;  // Setter: sets graph data
     backgroundColor(color: string): ForceGraphInstance;
     nodeRelSize(size: number): ForceGraphInstance;
     nodeCanvasObject(fn: (node: NodeObject, ctx: CanvasRenderingContext2D, globalScale: number) => void): ForceGraphInstance;
@@ -66,4 +67,3 @@ declare module 'force-graph' {
 
   export default function ForceGraph(): ForceGraphInstance;
 }
-
