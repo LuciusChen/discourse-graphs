@@ -403,6 +403,157 @@ Formula syntax:
 - `{avg:RELATION:TYPE:ATTR}` — Average attribute
 - Math operations: `+ - * /` and parentheses
 
+### Customizing Node Types and Relationships
+
+The default configuration assumes an empirical research workflow (Questions → Claims ← Evidence ← Sources). However, you can fully customize node types and relationships to match your domain.
+
+#### Understanding the Default Configuration
+
+The defaults define:
+
+```elisp
+;; Node types: what kinds of semantic units exist
+(setq dg-node-types
+  '((question . (:short "QUE" :color "lightblue"   :desc "Research question"))
+    (claim    . (:short "CLM" :color "lightyellow" :desc "Assertion or thesis"))
+    (evidence . (:short "EVD" :color "lightgreen"  :desc "Supporting data"))
+    (source   . (:short "SRC" :color "lightgray"   :desc "Reference material"))))
+
+;; Relation types: how nodes can be connected
+(setq dg-relation-types
+  '((supports  . (:inverse "Supported By" :color "green"  :style "solid"))
+    (opposes   . (:inverse "Opposed By"   :color "red"    :style "dashed"))
+    (informs   . (:inverse "Informed By"  :color "blue"   :style "solid"))
+    (answers   . (:inverse "Answered By"  :color "purple" :style "solid"))))
+
+;; Relation patterns: which source→target combinations are "canonical"
+;; Non-canonical relations are allowed but flagged for review
+(setq dg-relation-patterns
+  '((supports . (:source (evidence) :target (claim)))
+    (opposes  . (:source (evidence) :target (claim)))
+    (informs  . (:source (source) :target (evidence)))
+    (answers  . (:source (claim) :target (question)))))
+```
+
+#### Adding Custom Relation Types
+
+To add new relation types, extend `dg-relation-types`:
+
+```elisp
+(setq dg-relation-types
+  '((supports    . (:inverse "Supported By"    :color "green"   :style "solid"))
+    (opposes     . (:inverse "Opposed By"      :color "red"     :style "dashed"))
+    (informs     . (:inverse "Informed By"     :color "blue"    :style "solid"))
+    (answers     . (:inverse "Answered By"     :color "purple"  :style "solid"))
+    ;; Custom relations
+    (contradicts . (:inverse "Contradicted By" :color "orange"  :style "dashed"))
+    (refines     . (:inverse "Refined By"      :color "cyan"    :style "solid"))
+    (extends     . (:inverse "Extended By"     :color "teal"    :style "solid"))
+    (presupposes . (:inverse "Presupposed By"  :color "pink"    :style "dotted"))))
+```
+
+Then define valid patterns for your new relations:
+
+```elisp
+(setq dg-relation-patterns
+  '((supports    . (:source (evidence claim) :target (claim)))
+    (opposes     . (:source (evidence claim) :target (claim)))
+    (informs     . (:source (source) :target (evidence)))
+    (answers     . (:source (claim) :target (question)))
+    ;; Patterns for custom relations
+    (contradicts . (:source (claim) :target (claim)))
+    (refines     . (:source (claim) :target (claim)))
+    (extends     . (:source (claim) :target (claim)))
+    (presupposes . (:source (claim) :target (claim)))))
+```
+
+#### Adding Custom Node Types
+
+To add new node types:
+
+```elisp
+(setq dg-node-types
+  '((question   . (:short "QUE" :color "lightblue"   :desc "Research question"))
+    (claim      . (:short "CLM" :color "lightyellow" :desc "Assertion or thesis"))
+    (evidence   . (:short "EVD" :color "lightgreen"  :desc "Supporting data"))
+    (source     . (:short "SRC" :color "lightgray"   :desc "Reference material"))
+    ;; Custom types
+    (theory     . (:short "THY" :color "lightcoral"  :desc "Theoretical framework"))
+    (definition . (:short "DEF" :color "lavender"    :desc "Conceptual definition"))
+    (example    . (:short "EXM" :color "peachpuff"   :desc "Illustrative example"))))
+```
+
+#### Example: Philosophy/Theoretical Research
+
+For philosophical work where you're comparing theories and tracking logical relationships:
+
+```elisp
+;; Node types for philosophy
+(setq dg-node-types
+  '((question . (:short "QUE" :color "lightblue"   :desc "Philosophical question"))
+    (claim    . (:short "CLM" :color "lightyellow" :desc "Thesis or position"))
+    (evidence . (:short "EVD" :color "lightgreen"  :desc "Argument or proof"))
+    (source   . (:short "SRC" :color "lightgray"   :desc "Philosophical text"))
+    (theory   . (:short "THY" :color "lightcoral"  :desc "Theoretical framework"))))
+
+;; Allow claims to support/oppose other claims (for theory comparisons)
+(setq dg-relation-patterns
+  '((supports . (:source (evidence claim) :target (claim)))
+    (opposes  . (:source (evidence claim) :target (claim)))
+    (informs  . (:source (source) :target (evidence claim)))
+    (answers  . (:source (claim) :target (question)))))
+```
+
+With this configuration:
+- Use **opposes** between claims to track incompatible theories
+- Use **evidence** nodes for logical arguments, proofs, or demonstrations
+- Use **supports** between claims when one theory builds on another
+- The Web UI will visualize these connections, showing red dashed lines for opposing theories
+
+Example workflow for comparing theories:
+
+```org
+* Does free will exist?
+:PROPERTIES:
+:ID: q-free-will
+:DG_TYPE: question
+:END:
+
+* Libertarian free will is possible
+:PROPERTIES:
+:ID: clm-libertarian
+:DG_TYPE: claim
+:DG_ANSWERS: q-free-will
+:END:
+
+* Hard determinism: all events are causally determined
+:PROPERTIES:
+:ID: clm-determinism
+:DG_TYPE: claim
+:DG_ANSWERS: q-free-will
+:DG_OPPOSES: clm-libertarian
+:DG_OPPOSES_NOTE: Determinism is logically incompatible with libertarian free will
+:END:
+
+* Logical demonstration: if determinism, then no alternative possibilities
+:PROPERTIES:
+:ID: evd-modal-argument
+:DG_TYPE: evidence
+:DG_SUPPORTS: clm-determinism
+:DG_OPPOSES: clm-libertarian
+:END:
+```
+
+#### Disabling Relation Warnings
+
+By default, non-canonical relations trigger a warning. To disable this:
+
+```elisp
+(setq dg-warn-relation-anomalies nil)
+```
+
+This allows any relation between any node types without warnings.
+
 ## Export
 
 discourse-graphs.el leverages Emacs' built-in export capabilities. You can use org-mode's native export functions to convert your discourse graph to various formats:
